@@ -14,14 +14,24 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
   const [draft, setDraft] = useState({ name: '', color: LIB_COLORS[0], tags: '' });
 
   const panelW = Math.max(320, Math.min(560, Dimensions.get('window').width * 0.55));
-  const tx = useRef(new Animated.Value(panelW)).current;
+  const tx = useRef(new Animated.Value(panelW)).current;   // panel slide
+  const bd = useRef(new Animated.Value(0)).current;        // backdrop fade (0..1)
   useEffect(() => {
     if (visible) {
       setFolderId(null); setEditing(null);
+      // tx is parked off-screen (reset on close / init), so the first paint is
+      // off-screen; then the dark backdrop fades in as the panel slides in.
+      Animated.parallel([
+        Animated.timing(tx, { toValue: 0, duration: 240, useNativeDriver: true }),
+        Animated.timing(bd, { toValue: 1, duration: 240, useNativeDriver: true }),
+      ]).start();
+    } else {
+      // Park off-screen the moment it closes, so the NEXT open never flashes
+      // on-screen for a frame before the slide-in starts.
       tx.setValue(panelW);
-      Animated.timing(tx, { toValue: 0, duration: 220, useNativeDriver: true }).start();
+      bd.setValue(0);
     }
-  }, [visible, panelW, tx]);
+  }, [visible, panelW, tx, bd]);
 
   const { folders, files } = childrenOf(library, folderId);
   const crumbs = pathTo(library, folderId);
@@ -59,7 +69,9 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
       onRequestClose={onClose}
     >
       <View style={styles.root}>
-        <Pressable style={styles.backdrop} onPress={onClose} />
+        <Animated.View style={[styles.backdrop, { opacity: bd }]}>
+          <Pressable style={styles.backdropPress} onPress={onClose} />
+        </Animated.View>
         <Animated.View style={[styles.panel, { width: panelW, transform: [{ translateX: tx }] }]}>
           <SafeAreaView style={styles.safe}>
             <View style={styles.header}>
@@ -145,9 +157,10 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, flexDirection: 'row' },
-  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)' },
-  panel: { backgroundColor: theme.bgElevated, borderTopLeftRadius: 12, borderBottomLeftRadius: 12, borderLeftWidth: 1, borderColor: theme.border },
+  root: { flex: 1 },
+  backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)' },
+  backdropPress: { flex: 1 },
+  panel: { position: 'absolute', right: 0, top: 0, bottom: 0, backgroundColor: theme.bgElevated, borderTopLeftRadius: 12, borderBottomLeftRadius: 12, borderLeftWidth: 1, borderColor: theme.border },
   safe: { flex: 1, paddingBottom: 8 },
   header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 14, paddingBottom: 8 },
   title: { color: theme.text, fontSize: 17, fontWeight: '800' },
