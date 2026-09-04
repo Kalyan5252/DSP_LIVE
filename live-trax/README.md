@@ -139,3 +139,27 @@ Everything is plain JavaScript/JSX — no TypeScript, no hidden build tooling.
 
 Sample audio is **not** bundled — you load your own, so there are no licensing
 constraints on what you make.
+
+---
+
+## Remixlive-style board (v2 UI)
+
+The app now opens on an instrument-column board like Remixlive:
+
+- **Columns are instruments** (Kick, Snare, Tops, Bass, Chords, Keys, Lead, FX),
+  color-coded; **rows are variations** (A–F). Configure in `src/config.js`.
+- **One pad per column plays at a time** — tapping another row in a column swaps
+  that track's loop. Tapping the active pad stops it.
+- **Transport bar** (top): master **BPM**, **time-signature** picker (2/4, 3/4,
+  4/4, 6/8, 7/8, plus a custom builder), play/stop with a live **beat indicator**,
+  and a **QUANTIZE: BAR** toggle. With the transport running and quantize on,
+  column switches land on the next bar (the `src/transport.js` clock).
+- **Load your own loops**: tap an empty pad to import audio; long-press to clear.
+  Board + tempo persist between launches.
+
+Key files: `App.js` (column-exclusive + quantized-launch logic),
+`src/transport.js` (JS master clock), `src/components/TransportBar.js`,
+`src/components/InstrumentGrid.js`, `src/components/Pad.js`,
+`src/components/SignaturePicker.js`.
+
+Run it the usual way (`npm install` then `npx expo start`, open in Expo Go).
