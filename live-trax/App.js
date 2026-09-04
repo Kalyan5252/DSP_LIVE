@@ -6,7 +6,6 @@ import * as DocumentPicker from 'expo-document-picker';
 
 import { theme } from './src/theme';
 import { padId } from './src/config';
-import Transport from './src/transport';
 import engine from './src/audio/engine';
 import { importSampleFile, deleteSampleFile } from './src/storage/store';
 import { emptyLibrary, addFile } from './src/storage/library';
@@ -39,7 +38,6 @@ export default function App() {
   const [libMode, setLibMode] = useState('manage');
   const pickTargetRef = useRef(null);
 
-  const transport = useRef(new Transport()).current;
   const playingRef = useRef({});
   const queuedRef = useRef({});
   const padsRef = useRef({});
@@ -94,24 +92,24 @@ export default function App() {
     })();
 
     const last = { beatInBar: -1, barIndex: -1, playing: false };
-    const unsubTick = transport.subscribe((s) => {
+    const unsubTick = engine.subscribeBeat((s) => {
       if (s.beatInBar !== last.beatInBar || s.barIndex !== last.barIndex || s.playing !== last.playing) {
         last.beatInBar = s.beatInBar; last.barIndex = s.barIndex; last.playing = s.playing;
         setBeat(s);
       }
     });
-    const unsubBar = transport.onBar(() => {
+    const unsubBar = engine.onBar(() => {
       const q = queuedRef.current;
       for (const instKey of Object.keys(q)) applyColumnRef.current(instKey, q[instKey]);
     });
-    return () => { mounted = false; unsubTick(); unsubBar(); transport.dispose(); engine.unloadAll(); };
-  }, [transport]);
+    return () => { mounted = false; unsubTick(); unsubBar(); engine.disposeClock(); engine.unloadAll(); };
+  }, []);
 
   useEffect(() => {
-    transport.configure({ bpm, num: sig.num, den: sig.den });
-    engine.setMasterTempo(bpm); // forward-ready seam; C++ engine applies real lock
-  }, [bpm, sig, transport]);
-  useEffect(() => { transport.setQuantize(quantize); }, [quantize, transport]);
+    engine.setMasterTempo(bpm);            // clock + forward-ready tempo-lock seam
+    engine.setMasterSignature(sig.num, sig.den);
+  }, [bpm, sig]);
+  useEffect(() => { engine.setQuantize(quantize); }, [quantize]);
 
   // Debounced persistence of settings (tempo/signature/volume) so dragging the
   // dial or fader doesn't hammer storage.
@@ -175,9 +173,9 @@ export default function App() {
     }
     const cur = playingRef.current[inst.key];
     const target = cur === rowIndex ? 'stop' : rowIndex;
-    if (transport.playing && quantize === 'bar') writeQueued({ ...queuedRef.current, [inst.key]: target });
+    if (engine.isClockPlaying() && quantize === 'bar') writeQueued({ ...queuedRef.current, [inst.key]: target });
     else applyColumn(inst.key, target);
-  }, [transport, quantize, applyColumn, writeQueued]);
+  }, [quantize, applyColumn, writeQueued]);
 
   const onPadLong = useCallback((inst, rowIndex) => {
     const id = padId(inst.key, rowIndex);
@@ -192,12 +190,12 @@ export default function App() {
   }, [persist, writePlaying]);
 
   const onTogglePlay = useCallback(() => {
-    if (transport.playing) {
+    if (engine.isClockPlaying()) {
       const q = queuedRef.current;
       for (const instKey of Object.keys(q)) applyColumn(instKey, q[instKey]);
-      transport.stop();
-    } else transport.start();
-  }, [transport, applyColumn]);
+      engine.stopClock();
+    } else engine.startClock();
+  }, [applyColumn]);
 
   const onStopAll = useCallback(() => { engine.stopAll(); writePlaying({}); writeQueued({}); }, [writePlaying, writeQueued]);
   const openLibraryManage = useCallback(() => { pickTargetRef.current = null; setLibMode('manage'); setLibOpen(true); }, []);
