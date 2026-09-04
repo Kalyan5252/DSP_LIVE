@@ -9,14 +9,16 @@ import { padId } from './src/config';
 import Transport from './src/transport';
 import engine from './src/audio/engine';
 import { importSampleFile, deleteSampleFile } from './src/storage/store';
+import { emptyLibrary, addFile } from './src/storage/library';
 import TransportBar from './src/components/TransportBar';
 import InstrumentGrid from './src/components/InstrumentGrid';
-import LeftStrip from './src/components/LeftStrip';
 import RightRail from './src/components/RightRail';
 import SignaturePicker from './src/components/SignaturePicker';
-import TempoModal from './src/components/TempoModal';
+import TempoDial from './src/components/TempoDial';
+import LibraryBrowser from './src/components/LibraryBrowser';
 
 const STORE_KEY = 'livetrax.board.v1';
+const LIB_KEY = 'livetrax.library.v1';
 
 export default function App() {
   const [pads, setPads] = useState({});
@@ -30,6 +32,11 @@ export default function App() {
   const [tempoOpen, setTempoOpen] = useState(false);
   const [tab, setTab] = useState('Loop');
   const [recArmed, setRecArmed] = useState(false);
+
+  const [library, setLibrary] = useState(emptyLibrary());
+  const [libOpen, setLibOpen] = useState(false);
+  const [libMode, setLibMode] = useState('manage');
+  const pickTargetRef = useRef(null);
 
   const transport = useRef(new Transport()).current;
   const playingRef = useRef({});
@@ -71,6 +78,11 @@ export default function App() {
           if (saved.bpm) setBpm(saved.bpm);
           if (saved.sig) setSig(saved.sig);
         }
+        const rawLib = await AsyncStorage.getItem(LIB_KEY);
+        if (rawLib && mounted) {
+          const lib = JSON.parse(rawLib);
+          if (lib && lib.folders && lib.files) setLibrary(lib);
+        }
       } catch (e) { /* fresh */ }
     })();
 
@@ -95,36 +107,59 @@ export default function App() {
     AsyncStorage.setItem(STORE_KEY, JSON.stringify({ pads: nextPads, bpm, sig })).catch(() => {});
   }, [bpm, sig]);
 
-  const importOnto = useCallback(async (instKey, rowIndex) => {
+  const onChangeLibrary = useCallback((next, opts) => {
+    setLibrary(next);
+    AsyncStorage.setItem(LIB_KEY, JSON.stringify(next)).catch(() => {});
+    if (opts && opts.uris) opts.uris.forEach((u) => deleteSampleFile(u));
+  }, []);
+
+  // Import a loop INTO the library (not directly onto a pad).
+  const onImport = useCallback(async (folderId) => {
     try {
       const res = await DocumentPicker.getDocumentAsync({ type: 'audio/*', copyToCacheDirectory: true, multiple: false });
       if (res.canceled || !res.assets?.length) return;
       const asset = res.assets[0];
       const uri = await importSampleFile(asset.uri, asset.name || 'loop');
       const name = (asset.name || 'Loop').replace(/\.[^.]+$/, '');
-      const id = padId(instKey, rowIndex);
-      setPads((prev) => { const next = { ...prev, [id]: { uri, name } }; persist(next); return next; });
-      await engine.load(id, uri, true);
+      const { lib } = addFile(library, { name, uri }, folderId);
+      onChangeLibrary(lib);
     } catch (e) { /* ignore */ }
+  }, [library, onChangeLibrary]);
+
+  // Assign a chosen library loop to the pad that opened the browser.
+  const onPickFile = useCallback((file) => {
+    const target = pickTargetRef.current;
+    if (!target) return;
+    const id = padId(target.instKey, target.rowIndex);
+    setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name } }; persist(next); return next; });
+    engine.load(id, file.uri, true);
+    setLibOpen(false);
   }, [persist]);
 
   const onPadPress = useCallback((inst, rowIndex) => {
     const id = padId(inst.key, rowIndex);
-    if (!padsRef.current[id]?.uri) { importOnto(inst.key, rowIndex); return; }
+    if (!padsRef.current[id]?.uri) {
+      pickTargetRef.current = { instKey: inst.key, rowIndex };
+      setLibMode('pick'); setLibOpen(true);
+      return;
+    }
     const cur = playingRef.current[inst.key];
     const target = cur === rowIndex ? 'stop' : rowIndex;
     if (transport.playing && quantize === 'bar') writeQueued({ ...queuedRef.current, [inst.key]: target });
     else applyColumn(inst.key, target);
-  }, [importOnto, transport, quantize, applyColumn, writeQueued]);
+  }, [transport, quantize, applyColumn, writeQueued]);
 
   const onPadLong = useCallback((inst, rowIndex) => {
     const id = padId(inst.key, rowIndex);
-    if (!padsRef.current[id]?.uri) { importOnto(inst.key, rowIndex); return; }
+    if (!padsRef.current[id]?.uri) {
+      pickTargetRef.current = { instKey: inst.key, rowIndex };
+      setLibMode('pick'); setLibOpen(true);
+      return;
+    }
     engine.unload(id);
-    deleteSampleFile(padsRef.current[id].uri);
     if (playingRef.current[inst.key] === rowIndex) writePlaying({ ...playingRef.current, [inst.key]: null });
     setPads((prev) => { const next = { ...prev }; delete next[id]; persist(next); return next; });
-  }, [importOnto, persist, writePlaying]);
+  }, [persist, writePlaying]);
 
   const onTogglePlay = useCallback(() => {
     if (transport.playing) {
@@ -135,6 +170,8 @@ export default function App() {
   }, [transport, applyColumn]);
 
   const onStopAll = useCallback(() => { engine.stopAll(); writePlaying({}); writeQueued({}); }, [writePlaying, writeQueued]);
+
+  const openLibraryManage = useCallback(() => { pickTargetRef.current = null; setLibMode('manage'); setLibOpen(true); }, []);
 
   const activeCount = Object.values(playing).filter((v) => v != null).length;
 
@@ -159,7 +196,6 @@ export default function App() {
       />
 
       <View style={styles.body}>
-        <LeftStrip />
         <View style={styles.gridWrap}>
           <InstrumentGrid
             pads={pads}
@@ -169,7 +205,7 @@ export default function App() {
             onPadLong={onPadLong}
           />
         </View>
-        <RightRail onStopAll={onStopAll} activeCount={activeCount} />
+        <RightRail onStopAll={onStopAll} onOpenLibrary={openLibraryManage} activeCount={activeCount} />
       </View>
 
       <SignaturePicker
@@ -179,11 +215,20 @@ export default function App() {
         onClose={() => setSigOpen(false)}
         onSelect={(num, den) => { setSig({ num, den }); setSigOpen(false); }}
       />
-      <TempoModal
+      <TempoDial
         visible={tempoOpen}
         bpm={bpm}
         onClose={() => setTempoOpen(false)}
-        onChange={(v) => setBpm(Math.max(40, Math.min(300, Math.round(v))))}
+        onChange={(v) => setBpm(Math.max(20, Math.min(300, Math.round(v))))}
+      />
+      <LibraryBrowser
+        visible={libOpen}
+        library={library}
+        mode={libMode}
+        onClose={() => setLibOpen(false)}
+        onChangeLibrary={onChangeLibrary}
+        onPick={onPickFile}
+        onImport={onImport}
       />
     </SafeAreaView>
   );

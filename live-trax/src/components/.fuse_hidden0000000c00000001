@@ -12,7 +12,7 @@ export default function SignaturePicker({ visible, num, den, onClose, onSelect }
   useEffect(() => { setCn(num); setCd(den); }, [num, den, visible]);
 
   return (
-    <Modal visible={visible} transparent animationType="fade" supportedOrientations={["landscape","landscape-left","landscape-right","portrait"]} onRequestClose={onClose}>
+    <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <Pressable style={styles.backdrop} onPress={onClose}>
         <Pressable style={styles.card} onPress={() => {}}>
           <Text style={styles.heading}>Time signature</Text>
