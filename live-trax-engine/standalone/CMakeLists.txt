@@ -7,7 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(ENGINE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../engine)
 set(TP ${CMAKE_CURRENT_SOURCE_DIR}/../third_party)
 
-# --- padtest: the pad-trigger engine harness ---
+# --- padtest: pad-trigger engine harness ---
 add_executable(padtest
   test_main.cpp
   ${ENGINE_DIR}/PadEngine.cpp
@@ -15,6 +15,15 @@ add_executable(padtest
 )
 target_include_directories(padtest PRIVATE ${ENGINE_DIR})
 set(ALL_TARGETS padtest)
+
+# --- transport_demo: Phase 1 master-clock / time-signature harness ---
+add_executable(transport_demo
+  transport_demo.cpp
+  ${ENGINE_DIR}/Transport.cpp
+  ${ENGINE_DIR}/miniaudio_impl.cpp
+)
+target_include_directories(transport_demo PRIVATE ${ENGINE_DIR})
+list(APPEND ALL_TARGETS transport_demo)
 
 # --- stretch_demo: Phase 0 time-stretch proof (needs Signalsmith) ---
 if(EXISTS ${TP}/signalsmith-stretch/include/signalsmith-stretch/signalsmith-stretch.h)

@@ -104,3 +104,32 @@ Options: `--ratio R` (output/input length), `--orig B --target B` (tempo → rat
 
 Verified behavior: ratio 1.2 → 20% longer, pitch identical; `--semitones 12` →
 one octave up, duration identical. Tempo and pitch are fully independent.
+
+---
+
+## Phase 1 (in progress) — master clock & time signatures (`transport_demo`)
+
+`engine/Transport.{h,cpp}` is the master musical clock: it holds the master BPM
+and time signature and computes bar/beat boundaries in samples, the accent
+pattern, and the next quantized-launch boundary. It supports **2/4, 3/4, 4/4,
+6/8, 7/8** (master BPM is always quarter-note; `/8` signatures beat in eighths,
+grouped 6/8=3+3, 7/8=2+2+3).
+
+`transport_demo` lets you watch and hear it before it drives the UI:
+
+```bash
+cd live-trax-engine/standalone
+cmake -S . -B build && cmake --build build --target transport_demo
+
+# print the exact beat grid for a signature (deterministic, checkable):
+./build/transport_demo --bpm 120 --sig 7/8 --bars 2 --grid
+
+# hear it as a metronome (accents higher-pitched):
+./build/transport_demo --bpm 120 --sig 6/8 --bars 4 --metronome
+```
+
+Verified: 4/4 bar = 2.0 s @120; 3/4 = 1.5 s; 6/8 = 1.5 s (accents 1 & 4);
+7/8 = 1.75 s (accents 1, 3, 5); quantized-launch boundaries land on the grid.
+
+Next in Phase 1: fold this clock into the pad engine so tapped loops start on the
+next boundary, and pre-render each loop to the master tempo (the offline path).
