@@ -80,3 +80,27 @@ engine.shutdown();
 
 Your code is yours. miniaudio is public domain (MIT-0) and fine to ship
 commercially. No other dependencies.
+
+---
+
+## Phase 0 — Time-stretch proof (`stretch_demo`)
+
+The first step of the tempo/time-stretch feature (see `docs/TIME_STRETCH_PLAN.md`).
+It stretches one file's tempo **while preserving pitch** using
+[Signalsmith Stretch](https://github.com/Signalsmith-Audio/signalsmith-stretch)
+(MIT), independent of the pad engine — prove it sounds good before we wire
+stretching into the pads.
+
+```bash
+cd live-trax-engine
+bash fetch_deps.sh          # now also clones Signalsmith into third_party/
+cd standalone
+# stretch a 120-BPM loop down to 100 BPM (pitch unchanged), and play it:
+bash run_stretch.sh ~/Music/loops/pattern1.wav --orig 120 --target 100 --play
+```
+
+Options: `--ratio R` (output/input length), `--orig B --target B` (tempo → ratio),
+`--semitones S` (independent pitch shift), `--out FILE.wav`, `--play`.
+
+Verified behavior: ratio 1.2 → 20% longer, pitch identical; `--semitones 12` →
+one octave up, duration identical. Tempo and pitch are fully independent.

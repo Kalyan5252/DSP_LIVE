@@ -1,0 +1,21 @@
+# Node / Expo
+node_modules/
+.expo/
+dist/
+web-build/
+
+# Native build artifacts
+**/standalone/build/
+*.o
+*.obj
+
+# Fetched dependencies (restore with fetch_deps.sh)
+**/engine/miniaudio.h
+**/third_party/
+
+# Demo outputs
+stretched.wav
+out_*.wav
+
+# macOS
+.DS_Store
