@@ -3,7 +3,7 @@
     "name": "Live Trax",
     "slug": "live-trax",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "landscape",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "splash": {
@@ -11,12 +11,16 @@
       "resizeMode": "contain",
       "backgroundColor": "#0E0E12"
     },
-    "assetBundlePatterns": ["**/*"],
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.livetrax.app",
       "infoPlist": {
-        "UIBackgroundModes": ["audio"]
+        "UIBackgroundModes": [
+          "audio"
+        ]
       }
     },
     "android": {
@@ -26,7 +30,9 @@
         "backgroundColor": "#0E0E12"
       }
     },
-    "plugins": ["expo-audio"],
+    "plugins": [
+      "expo-audio"
+    ],
     "newArchEnabled": true
   }
 }

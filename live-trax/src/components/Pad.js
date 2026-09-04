@@ -2,25 +2,19 @@ import React, { useEffect, useRef } from 'react';
 import { Animated, Pressable, Text, View, StyleSheet, Easing } from 'react-native';
 import { theme } from '../theme';
 
-// One pad in an instrument column. States:
-//   empty    -> faint outline in the instrument color, "+" to load a loop
-//   loaded   -> tinted tile with the loop name
-//   queued   -> loaded + pulsing ring (waiting for the next bar to start)
-//   playing  -> filled in the instrument color (the one active pad in its column)
-export default function Pad({ pad, instrument, rowLabel, isPlaying, isQueued, onPress, onLongPress }) {
+// A pad that fills its grid cell (flex:1 — no fixed size, so the whole board
+// fits the screen). Matches the Remixlive look: empty pads are neutral, loaded
+// pads take the column color with a loop ring + name, the active pad is filled.
+export default function Pad({ pad, color, isPlaying, isQueued, onPress, onLongPress }) {
   const empty = !pad || !pad.uri;
-  const color = instrument.color;
 
-  // Pulse animation for the queued (about-to-launch) state.
   const pulse = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     if (isQueued) {
-      const loop = Animated.loop(
-        Animated.sequence([
-          Animated.timing(pulse, { toValue: 1, duration: 380, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
-          Animated.timing(pulse, { toValue: 0, duration: 380, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
-        ])
-      );
+      const loop = Animated.loop(Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: 360, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
+        Animated.timing(pulse, { toValue: 0, duration: 360, easing: Easing.inOut(Easing.quad), useNativeDriver: false }),
+      ]));
       loop.start();
       return () => loop.stop();
     }
@@ -28,35 +22,44 @@ export default function Pad({ pad, instrument, rowLabel, isPlaying, isQueued, on
     return undefined;
   }, [isQueued, pulse]);
 
+  const bg = empty
+    ? theme.surface
+    : isPlaying ? color : withAlpha(color, 0.18);
   const borderColor = isQueued
     ? pulse.interpolate({ inputRange: [0, 1], outputRange: [withAlpha(color, 0.4), color] })
-    : isPlaying
-    ? color
-    : withAlpha(color, empty ? 0.28 : 0.55);
-
-  const bg = isPlaying ? color : withAlpha(color, empty ? 0.06 : 0.16);
-  const textColor = isPlaying ? '#0E0E12' : empty ? theme.textFaint : theme.text;
+    : empty ? theme.border : isPlaying ? color : withAlpha(color, 0.5);
+  const fg = isPlaying ? '#12121A' : color;
 
   return (
-    <Pressable onPress={onPress} onLongPress={onLongPress} delayLongPress={280} style={styles.wrap}>
+    <Pressable onPress={onPress} onLongPress={onLongPress} delayLongPress={280} style={styles.cell}>
       <Animated.View
         style={[
           styles.pad,
           { backgroundColor: bg, borderColor },
-          isPlaying && { shadowColor: color, shadowOpacity: 0.8, shadowRadius: 12, elevation: 6 },
+          isPlaying && { shadowColor: color, shadowOpacity: 0.7, shadowRadius: 10, elevation: 5 },
         ]}
       >
-        <View style={styles.top}>
-          <View style={[styles.dot, { borderColor: isPlaying ? '#0E0E12' : withAlpha(color, 0.8) }]}>
-            {isPlaying ? <View style={[styles.dotFill, { backgroundColor: '#0E0E12' }]} /> : null}
+        {empty ? (
+          <Text style={styles.plus}>+</Text>
+        ) : (
+          <View style={styles.content}>
+            <Ring color={fg} filled={isPlaying} />
+            <Text numberOfLines={2} style={[styles.name, { color: isPlaying ? '#12121A' : theme.text }]}>
+              {pad.name}
+            </Text>
           </View>
-          <Text style={[styles.row, { color: isPlaying ? '#0E0E12' : withAlpha(color, 0.9) }]}>{rowLabel}</Text>
-        </View>
-        <Text numberOfLines={2} style={[styles.name, { color: textColor }]}>
-          {empty ? instrument.name : pad.name}
-        </Text>
+        )}
       </Animated.View>
     </Pressable>
+  );
+}
+
+// The circular loop indicator drawn on loaded pads.
+function Ring({ color, filled }) {
+  return (
+    <View style={[styles.ring, { borderColor: color }]}>
+      {filled ? <View style={[styles.ringFill, { backgroundColor: color }]} /> : null}
+    </View>
   );
 }
 
@@ -65,24 +68,12 @@ function withAlpha(hex, a) {
   return `${hex}${v}`;
 }
 
-const PAD_W = 92;
-const PAD_H = 78;
-
 const styles = StyleSheet.create({
-  wrap: { width: PAD_W, height: PAD_H },
-  pad: {
-    flex: 1,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    padding: 8,
-    justifyContent: 'space-between',
-  },
-  top: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  dot: { width: 12, height: 12, borderRadius: 6, borderWidth: 1.5, alignItems: 'center', justifyContent: 'center' },
-  dotFill: { width: 5, height: 5, borderRadius: 2.5 },
-  row: { fontSize: 10, fontWeight: '700', letterSpacing: 0.5 },
-  name: { fontSize: 12, fontWeight: '600' },
+  cell: { flex: 1 },
+  pad: { flex: 1, borderRadius: 10, borderWidth: 1.5, paddingHorizontal: 7, justifyContent: 'center' },
+  plus: { color: theme.textFaint, fontSize: 16, fontWeight: '300', alignSelf: 'center', opacity: 0.5 },
+  content: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  ring: { width: 15, height: 15, borderRadius: 7.5, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
+  ringFill: { width: 5, height: 5, borderRadius: 2.5 },
+  name: { flex: 1, fontSize: 11, fontWeight: '700' },
 });
-
-export const PAD_WIDTH = PAD_W;
-export const PAD_HEIGHT = PAD_H;
