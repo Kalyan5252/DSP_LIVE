@@ -75,13 +75,15 @@ export default function App() {
           if (saved.pads) {
             setPads(saved.pads);
             for (const id of Object.keys(saved.pads)) {
-              if (saved.pads[id]?.uri) await engine.load(id, saved.pads[id].uri, true);
+              const p = saved.pads[id];
+              if (p?.uri) await engine.load(id, p.uri, { bpm: p.bpm || saved.bpm, loop: true });
             }
           }
           if (saved.bpm) setBpm(saved.bpm);
           if (saved.sig) setSig(saved.sig);
           if (typeof saved.volume === 'number') { setVolume(saved.volume); volumeRef.current = saved.volume; }
           engine.setMasterVolume(volumeRef.current);
+          engine.setMasterTempo(saved.bpm || 120);
         }
         const rawLib = await AsyncStorage.getItem(LIB_KEY);
         if (rawLib && mounted) {
@@ -105,7 +107,10 @@ export default function App() {
     return () => { mounted = false; unsubTick(); unsubBar(); transport.dispose(); engine.unloadAll(); };
   }, [transport]);
 
-  useEffect(() => { transport.configure({ bpm, num: sig.num, den: sig.den }); }, [bpm, sig, transport]);
+  useEffect(() => {
+    transport.configure({ bpm, num: sig.num, den: sig.den });
+    engine.setMasterTempo(bpm); // forward-ready seam; C++ engine applies real lock
+  }, [bpm, sig, transport]);
   useEffect(() => { transport.setQuantize(quantize); }, [quantize, transport]);
 
   // Debounced persistence of settings (tempo/signature/volume) so dragging the
@@ -144,19 +149,22 @@ export default function App() {
       const asset = res.assets[0];
       const uri = await importSampleFile(asset.uri, asset.name || 'loop');
       const name = (asset.name || 'Loop').replace(/\.[^.]+$/, '');
-      const { lib } = addFile(library, { name, uri }, folderId);
+      // Default the loop's original BPM to the current master (a sensible guess
+      // the user can correct in the library editor).
+      const { lib } = addFile(library, { name, uri, bpm }, folderId);
       onChangeLibrary(lib);
     } catch (e) { /* ignore */ }
-  }, [library, onChangeLibrary]);
+  }, [library, onChangeLibrary, bpm]);
 
   const onPickFile = useCallback((file) => {
     const target = pickTargetRef.current;
     if (!target) return;
     const id = padId(target.instKey, target.rowIndex);
-    setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name } }; persist(next); return next; });
-    engine.load(id, file.uri, true);
+    const loopBpm = file.bpm || bpm; // the loop's tempo rides onto the pad
+    setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name, bpm: file.bpm || null } }; persist(next); return next; });
+    engine.load(id, file.uri, { bpm: loopBpm, loop: true });
     setLibOpen(false);
-  }, [persist]);
+  }, [persist, bpm]);
 
   const onPadPress = useCallback((inst, rowIndex) => {
     const id = padId(inst.key, rowIndex);

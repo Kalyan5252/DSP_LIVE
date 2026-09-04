@@ -32,9 +32,12 @@ export function addFolder(lib, name, parentId = null, color = LIB_COLORS[8]) {
   return { lib: { ...lib, folders }, id };
 }
 
-export function addFile(lib, { name, uri }, folderId = null, color = LIB_COLORS[0]) {
+export function addFile(lib, { name, uri, bpm }, folderId = null, color = LIB_COLORS[0]) {
   const id = uid('fil');
-  const files = { ...lib.files, [id]: { id, name: name || 'Loop', uri, color, tags: [], folderId } };
+  const files = {
+    ...lib.files,
+    [id]: { id, name: name || 'Loop', uri, color, tags: [], bpm: bpm > 0 ? bpm : null, folderId },
+  };
   return { lib: { ...lib, files }, id };
 }
 

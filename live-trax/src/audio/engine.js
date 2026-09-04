@@ -1,25 +1,35 @@
-// Audio engine for the pad grid.
+// Audio engine for the pad grid — the app's single audio interface.
 //
-// Built on expo-audio's imperative API (createAudioPlayer), which is the right
-// fit for a grid: each pad owns one long-lived player that we trigger, loop, and
-// stop independently, and many can sound at once. (The hook-based useAudioPlayer
-// API is awkward here because the number of players is dynamic.)
+// This is the seam the rest of the app talks to. Today it is backed by
+// expo-audio (JS). When the C++ Signalsmith engine is integrated
+// (docs/CPP_INTEGRATION_PLAN.md), this same interface forwards to it over JSI and
+// nothing above the interface changes.
 //
-// A pad in "loop" mode keeps repeating until tapped again — this is what lets you
-// stack a drum loop, a bassline, and a melody and have them play together, the
-// core Remixlive-style workflow. A pad in "one-shot" mode plays once and stops.
+// Interface:
+//   configure()                         one-time audio-session setup
+//   load(padId, uri, { bpm, loop })     load a loop; bpm is its original tempo
+//   trigger(padId) / stop / stopAll
+//   setLoop(padId, loop)
+//   setMasterTempo(bpm)                 master tempo (see note below)
+//   setMasterVolume(0..1)
+//   isLoaded / getBaseBpm / unload / unloadAll
+//
+// Tempo note: expo-audio does not time-stretch, so setMasterTempo here only
+// records the tempo and each pad keeps its original bpm. Real, pitch-preserving
+// tempo-lock (rate = masterBpm / loopBpm) is applied by the C++ engine once
+// integrated — at which point this method becomes the live control.
 
 import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 
 class AudioEngine {
   constructor() {
-    this.entries = new Map(); // padId -> { player, sub }
-    this.listener = null; // (padId, isPlaying) => void
+    this.entries = new Map(); // padId -> { player, sub, baseBpm }
+    this.listener = null;
     this.configured = false;
-    this.masterVolume = 1; // 0..1 applied to every pad
+    this.masterVolume = 1;
+    this.masterBpm = 120;
   }
 
-  // Master volume: apply to all current players and remember it for new loads.
   setMasterVolume(v) {
     this.masterVolume = Math.max(0, Math.min(1, v));
     for (const [, e] of this.entries) {
@@ -27,7 +37,12 @@ class AudioEngine {
     }
   }
 
-  // Route audio so it plays even when the phone's ringer is on silent.
+  // Records the master tempo. No audio effect on the expo-audio backend; the C++
+  // engine will apply it as real tempo-lock using each pad's baseBpm.
+  setMasterTempo(bpm) {
+    if (bpm > 0) this.masterBpm = bpm;
+  }
+
   async configure() {
     if (this.configured) return;
     try {
@@ -37,35 +52,32 @@ class AudioEngine {
         interruptionMode: 'mixWithOthers',
       });
       this.configured = true;
-    } catch (e) {
-      // Fall through; playback may still work with defaults.
-    }
+    } catch (e) { /* defaults */ }
   }
 
-  setListener(fn) {
-    this.listener = fn;
-  }
+  setListener(fn) { this.listener = fn; }
+  _emit(padId, isPlaying) { if (this.listener) this.listener(padId, isPlaying); }
 
-  _emit(padId, isPlaying) {
-    if (this.listener) this.listener(padId, isPlaying);
-  }
-
-  // Create (or replace) the player behind a pad.
-  async load(padId, uri, loop) {
+  // Load a loop onto a pad. opts.bpm = the loop's own tempo (defaults to the
+  // current master); opts.loop = whether it repeats.
+  async load(padId, uri, opts = {}) {
     this.unload(padId);
+    const { bpm, loop } = opts;
     const player = createAudioPlayer({ uri });
     player.loop = !!loop;
     try { player.volume = this.masterVolume; } catch (err) { /* ignore */ }
 
     const sub = player.addListener('playbackStatusUpdate', (status) => {
-      // When a one-shot reaches its end, report the pad as idle so the UI can
-      // drop its lit state.
-      if (status && status.didJustFinish && !player.loop) {
-        this._emit(padId, false);
-      }
+      if (status && status.didJustFinish && !player.loop) this._emit(padId, false);
     });
 
-    this.entries.set(padId, { player, sub });
+    this.entries.set(padId, { player, sub, baseBpm: bpm > 0 ? bpm : this.masterBpm });
+  }
+
+  // The loop's original tempo, for the tempo-lock ratio (used by the C++ engine).
+  getBaseBpm(padId) {
+    const e = this.entries.get(padId);
+    return e ? e.baseBpm : this.masterBpm;
   }
 
   setLoop(padId, loop) {
@@ -73,24 +85,14 @@ class AudioEngine {
     if (e) e.player.loop = !!loop;
   }
 
-  isLoaded(padId) {
-    return this.entries.has(padId);
-  }
+  isLoaded(padId) { return this.entries.has(padId); }
 
-  // Tap behavior: if it's playing, stop it; otherwise restart from the top.
   trigger(padId) {
     const e = this.entries.get(padId);
     if (!e) return;
     const { player } = e;
-    if (player.playing) {
-      player.pause();
-      player.seekTo(0);
-      this._emit(padId, false);
-    } else {
-      player.seekTo(0);
-      player.play();
-      this._emit(padId, true);
-    }
+    if (player.playing) { player.pause(); player.seekTo(0); this._emit(padId, false); }
+    else { player.seekTo(0); player.play(); this._emit(padId, true); }
   }
 
   stop(padId) {
@@ -112,21 +114,13 @@ class AudioEngine {
   unload(padId) {
     const e = this.entries.get(padId);
     if (!e) return;
-    try {
-      if (e.sub && e.sub.remove) e.sub.remove();
-      e.player.remove();
-    } catch (err) {
-      // Player may already be released.
-    }
+    try { if (e.sub && e.sub.remove) e.sub.remove(); e.player.remove(); } catch (err) { /* released */ }
     this.entries.delete(padId);
   }
 
   unloadAll() {
-    for (const padId of Array.from(this.entries.keys())) {
-      this.unload(padId);
-    }
+    for (const padId of Array.from(this.entries.keys())) this.unload(padId);
   }
 }
 
-// One shared engine for the whole app.
 export default new AudioEngine();

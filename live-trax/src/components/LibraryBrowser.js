@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Modal, View, Text, Pressable, TextInput, ScrollView, StyleSheet, Animated, Dimensions, SafeAreaView } from 'react-native';
+import { Modal, View, Text, Pressable, TextInput, ScrollView, StyleSheet, Animated, Dimensions, SafeAreaView, Keyboard, InputAccessoryView, Platform } from 'react-native';
+
+const KB_ACCESSORY = 'lt-kb-done';
 import { theme } from '../theme';
 import { Folder, Chevron } from './Icons';
 import {
@@ -11,7 +13,7 @@ import {
 export default function LibraryBrowser({ visible, library, mode, onClose, onChangeLibrary, onPick, onImport }) {
   const [folderId, setFolderId] = useState(null);
   const [editing, setEditing] = useState(null);
-  const [draft, setDraft] = useState({ name: '', color: LIB_COLORS[0], tags: '' });
+  const [draft, setDraft] = useState({ name: '', color: LIB_COLORS[0], tags: '', bpm: '' });
 
   const panelW = Math.max(320, Math.min(560, Dimensions.get('window').width * 0.55));
   const tx = useRef(new Animated.Value(panelW)).current;   // panel slide
@@ -38,12 +40,16 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
 
   const openEditor = (kind, item) => {
     setEditing({ kind, id: item.id });
-    setDraft({ name: item.name, color: item.color, tags: (item.tags || []).join(', ') });
+    setDraft({ name: item.name, color: item.color, tags: (item.tags || []).join(', '), bpm: item.bpm ? String(item.bpm) : '' });
   };
   const saveEditor = () => {
     if (!editing) return;
     const patch = { name: draft.name.trim() || 'Untitled', color: draft.color };
-    if (editing.kind === 'file') patch.tags = draft.tags.split(',').map((s) => s.trim()).filter(Boolean);
+    if (editing.kind === 'file') {
+      patch.tags = draft.tags.split(',').map((s) => s.trim()).filter(Boolean);
+      const n = parseInt(draft.bpm, 10);
+      patch.bpm = n > 0 ? n : null;
+    }
     onChangeLibrary(editing.kind === 'folder' ? updateFolder(library, editing.id, patch) : updateFile(library, editing.id, patch));
     setEditing(null);
   };
@@ -57,7 +63,7 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
     const { lib, id } = addFolder(library, 'New Folder', folderId);
     onChangeLibrary(lib);
     setEditing({ kind: 'folder', id });
-    setDraft({ name: 'New Folder', color: LIB_COLORS[8], tags: '' });
+    setDraft({ name: 'New Folder', color: LIB_COLORS[8], tags: '', bpm: '' });
   };
 
   return (
@@ -111,6 +117,7 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
                 <Pressable key={f.id} style={styles.row} onPress={() => (mode === 'pick' ? onPick(f) : openEditor('file', f))} onLongPress={() => openEditor('file', f)}>
                   <View style={[styles.chip, { backgroundColor: f.color }]} />
                   <Text style={styles.rowName} numberOfLines={1}>{f.name}</Text>
+                  {f.bpm ? <Text style={styles.bpm}>{f.bpm} BPM</Text> : null}
                   {f.tags && f.tags.length ? (
                     <View style={styles.tags}>{f.tags.slice(0, 2).map((t) => <Text key={t} style={styles.tag}>{t}</Text>)}</View>
                   ) : null}
@@ -127,15 +134,17 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
         </Animated.View>
 
         {editing ? (
-          <View style={styles.editorWrap}>
-            <View style={styles.editor}>
+          <Pressable style={styles.editorWrap} onPress={() => Keyboard.dismiss()}>
+            <Pressable style={styles.editor} onPress={() => {}}>
               <Text style={styles.editorTitle}>{editing.kind === 'folder' ? 'Folder' : 'Loop'}</Text>
               <Text style={styles.elabel}>NAME</Text>
-              <TextInput value={draft.name} onChangeText={(name) => setDraft((d) => ({ ...d, name }))} style={styles.input} placeholder="Name" placeholderTextColor={theme.textFaint} />
+              <TextInput value={draft.name} onChangeText={(name) => setDraft((d) => ({ ...d, name }))} style={styles.input} placeholder="Name" placeholderTextColor={theme.textFaint} returnKeyType="done" blurOnSubmit onSubmitEditing={() => Keyboard.dismiss()} inputAccessoryViewID={Platform.OS === 'ios' ? KB_ACCESSORY : undefined} />
               {editing.kind === 'file' ? (
                 <>
+                  <Text style={styles.elabel}>ORIGINAL BPM (for tempo-lock)</Text>
+                  <TextInput value={draft.bpm} onChangeText={(bpm) => setDraft((d) => ({ ...d, bpm: bpm.replace(/[^0-9]/g, '') }))} style={styles.input} keyboardType="decimal-pad" placeholder="e.g. 120" placeholderTextColor={theme.textFaint} inputAccessoryViewID={Platform.OS === 'ios' ? KB_ACCESSORY : undefined} />
                   <Text style={styles.elabel}>TAGS (comma-separated)</Text>
-                  <TextInput value={draft.tags} onChangeText={(tags) => setDraft((d) => ({ ...d, tags }))} style={styles.input} placeholder="kick, 120, dark" placeholderTextColor={theme.textFaint} />
+                  <TextInput value={draft.tags} onChangeText={(tags) => setDraft((d) => ({ ...d, tags }))} style={styles.input} placeholder="kick, 120, dark" placeholderTextColor={theme.textFaint} returnKeyType="done" blurOnSubmit onSubmitEditing={() => Keyboard.dismiss()} inputAccessoryViewID={Platform.OS === 'ios' ? KB_ACCESSORY : undefined} />
                 </>
               ) : null}
               <Text style={styles.elabel}>COLOR</Text>
@@ -148,8 +157,17 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
                 <Pressable style={styles.del} onPress={removeItem}><Text style={styles.delTxt}>Delete</Text></Pressable>
                 <Pressable style={styles.save} onPress={saveEditor}><Text style={styles.saveTxt}>Done</Text></Pressable>
               </View>
+            </Pressable>
+          </Pressable>
+        ) : null}
+
+        {/* iOS: a Done bar above the keyboard so numeric fields can be dismissed */}
+        {Platform.OS === 'ios' ? (
+          <InputAccessoryView nativeID={KB_ACCESSORY}>
+            <View style={styles.kbBar}>
+              <Pressable onPress={() => Keyboard.dismiss()} style={styles.kbDone}><Text style={styles.kbDoneTxt}>Done</Text></Pressable>
             </View>
-          </View>
+          </InputAccessoryView>
         ) : null}
       </View>
     </Modal>
@@ -180,6 +198,7 @@ const styles = StyleSheet.create({
   row: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 11 },
   chip: { width: 9, height: 22, borderRadius: 3 },
   rowName: { flex: 1, color: theme.text, fontSize: 14, fontWeight: '600' },
+  bpm: { color: theme.good, fontSize: 11, fontWeight: '800', fontVariant: ['tabular-nums'] },
   tags: { flexDirection: 'row', gap: 4 },
   tag: { color: theme.textDim, fontSize: 10, fontWeight: '700', backgroundColor: theme.surfaceActive, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 5, overflow: 'hidden' },
   use: { color: theme.good, fontWeight: '800', fontSize: 12 },
@@ -198,4 +217,7 @@ const styles = StyleSheet.create({
   delTxt: { color: theme.danger, fontWeight: '800', fontSize: 14 },
   save: { backgroundColor: theme.text, borderRadius: 8, paddingHorizontal: 22, paddingVertical: 11 },
   saveTxt: { color: theme.bg, fontWeight: '800', fontSize: 14 },
+  kbBar: { backgroundColor: theme.bgElevated, borderTopWidth: 1, borderTopColor: theme.border, alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 8 },
+  kbDone: { paddingHorizontal: 18, paddingVertical: 8, borderRadius: 8, backgroundColor: theme.accent },
+  kbDoneTxt: { color: '#0E0E12', fontWeight: '800', fontSize: 14 },
 });
