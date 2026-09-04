@@ -1,0 +1,3 @@
+/Users/kalyan/Desktop/MY FILES/DT projects/live/live-trax-engine/standalone/build/CMakeFiles/padtest.dir
+/Users/kalyan/Desktop/MY FILES/DT projects/live/live-trax-engine/standalone/build/CMakeFiles/edit_cache.dir
+/Users/kalyan/Desktop/MY FILES/DT projects/live/live-trax-engine/standalone/build/CMakeFiles/rebuild_cache.dir
