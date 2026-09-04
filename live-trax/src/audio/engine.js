@@ -16,6 +16,15 @@ class AudioEngine {
     this.entries = new Map(); // padId -> { player, sub }
     this.listener = null; // (padId, isPlaying) => void
     this.configured = false;
+    this.masterVolume = 1; // 0..1 applied to every pad
+  }
+
+  // Master volume: apply to all current players and remember it for new loads.
+  setMasterVolume(v) {
+    this.masterVolume = Math.max(0, Math.min(1, v));
+    for (const [, e] of this.entries) {
+      try { e.player.volume = this.masterVolume; } catch (err) { /* released */ }
+    }
   }
 
   // Route audio so it plays even when the phone's ringer is on silent.
@@ -46,6 +55,7 @@ class AudioEngine {
     this.unload(padId);
     const player = createAudioPlayer({ uri });
     player.loop = !!loop;
+    try { player.volume = this.masterVolume; } catch (err) { /* ignore */ }
 
     const sub = player.addListener('playbackStatusUpdate', (status) => {
       // When a one-shot reaches its end, report the pad as idle so the UI can

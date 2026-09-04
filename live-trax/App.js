@@ -28,6 +28,7 @@ export default function App() {
   const [sig, setSig] = useState({ num: 4, den: 4 });
   const [quantize, setQuantize] = useState('bar');
   const [beat, setBeat] = useState({ playing: false, barIndex: 0, beatInBar: 0 });
+  const [volume, setVolume] = useState(1);
   const [sigOpen, setSigOpen] = useState(false);
   const [tempoOpen, setTempoOpen] = useState(false);
   const [tab, setTab] = useState('Loop');
@@ -42,6 +43,7 @@ export default function App() {
   const playingRef = useRef({});
   const queuedRef = useRef({});
   const padsRef = useRef({});
+  const volumeRef = useRef(1);
   padsRef.current = pads;
 
   const writePlaying = useCallback((next) => { playingRef.current = next; setPlaying(next); }, []);
@@ -77,6 +79,8 @@ export default function App() {
           }
           if (saved.bpm) setBpm(saved.bpm);
           if (saved.sig) setSig(saved.sig);
+          if (typeof saved.volume === 'number') { setVolume(saved.volume); volumeRef.current = saved.volume; }
+          engine.setMasterVolume(volumeRef.current);
         }
         const rawLib = await AsyncStorage.getItem(LIB_KEY);
         if (rawLib && mounted) {
@@ -103,9 +107,20 @@ export default function App() {
   useEffect(() => { transport.configure({ bpm, num: sig.num, den: sig.den }); }, [bpm, sig, transport]);
   useEffect(() => { transport.setQuantize(quantize); }, [quantize, transport]);
 
+  // Debounced persistence of settings (tempo/signature/volume) so dragging the
+  // dial or fader doesn't hammer storage.
+  useEffect(() => {
+    const t = setTimeout(() => {
+      AsyncStorage.setItem(STORE_KEY, JSON.stringify({ pads: padsRef.current, bpm, sig, volume })).catch(() => {});
+    }, 500);
+    return () => clearTimeout(t);
+  }, [bpm, sig, volume]);
+
   const persist = useCallback((nextPads) => {
-    AsyncStorage.setItem(STORE_KEY, JSON.stringify({ pads: nextPads, bpm, sig })).catch(() => {});
+    AsyncStorage.setItem(STORE_KEY, JSON.stringify({ pads: nextPads, bpm, sig, volume: volumeRef.current })).catch(() => {});
   }, [bpm, sig]);
+
+  const onVolume = useCallback((v) => { volumeRef.current = v; setVolume(v); engine.setMasterVolume(v); }, []);
 
   const onChangeLibrary = useCallback((next, opts) => {
     setLibrary(next);
@@ -113,7 +128,6 @@ export default function App() {
     if (opts && opts.uris) opts.uris.forEach((u) => deleteSampleFile(u));
   }, []);
 
-  // Import a loop INTO the library (not directly onto a pad).
   const onImport = useCallback(async (folderId) => {
     try {
       const res = await DocumentPicker.getDocumentAsync({ type: 'audio/*', copyToCacheDirectory: true, multiple: false });
@@ -126,7 +140,6 @@ export default function App() {
     } catch (e) { /* ignore */ }
   }, [library, onChangeLibrary]);
 
-  // Assign a chosen library loop to the pad that opened the browser.
   const onPickFile = useCallback((file) => {
     const target = pickTargetRef.current;
     if (!target) return;
@@ -170,7 +183,6 @@ export default function App() {
   }, [transport, applyColumn]);
 
   const onStopAll = useCallback(() => { engine.stopAll(); writePlaying({}); writeQueued({}); }, [writePlaying, writeQueued]);
-
   const openLibraryManage = useCallback(() => { pickTargetRef.current = null; setLibMode('manage'); setLibOpen(true); }, []);
 
   const activeCount = Object.values(playing).filter((v) => v != null).length;
@@ -179,14 +191,9 @@ export default function App() {
     <SafeAreaView style={styles.safe}>
       <StatusBar style="light" hidden />
       <TransportBar
-        bpm={bpm}
-        num={sig.num}
-        den={sig.den}
-        playing={beat.playing}
-        quantize={quantize}
-        beat={beat}
-        recArmed={recArmed}
-        activeTab={tab}
+        bpm={bpm} num={sig.num} den={sig.den}
+        playing={beat.playing} quantize={quantize} beat={beat}
+        recArmed={recArmed} activeTab={tab}
         onTogglePlay={onTogglePlay}
         onOpenTempo={() => setTempoOpen(true)}
         onOpenSignature={() => setSigOpen(true)}
@@ -197,49 +204,20 @@ export default function App() {
 
       <View style={styles.body}>
         <View style={styles.gridWrap}>
-          <InstrumentGrid
-            pads={pads}
-            playingByColumn={playing}
-            queuedByColumn={queued}
-            onPadPress={onPadPress}
-            onPadLong={onPadLong}
-          />
+          <InstrumentGrid pads={pads} playingByColumn={playing} queuedByColumn={queued} onPadPress={onPadPress} onPadLong={onPadLong} />
         </View>
-        <RightRail onStopAll={onStopAll} onOpenLibrary={openLibraryManage} activeCount={activeCount} />
+        <RightRail onStopAll={onStopAll} onOpenLibrary={openLibraryManage} activeCount={activeCount} volume={volume} onVolume={onVolume} />
       </View>
 
-      <SignaturePicker
-        visible={sigOpen}
-        num={sig.num}
-        den={sig.den}
-        onClose={() => setSigOpen(false)}
-        onSelect={(num, den) => { setSig({ num, den }); setSigOpen(false); }}
-      />
-      <TempoDial
-        visible={tempoOpen}
-        bpm={bpm}
-        onClose={() => setTempoOpen(false)}
-        onChange={(v) => setBpm(Math.max(20, Math.min(300, Math.round(v))))}
-      />
-      <LibraryBrowser
-        visible={libOpen}
-        library={library}
-        mode={libMode}
-        onClose={() => setLibOpen(false)}
-        onChangeLibrary={onChangeLibrary}
-        onPick={onPickFile}
-        onImport={onImport}
-      />
+      <SignaturePicker visible={sigOpen} num={sig.num} den={sig.den} onClose={() => setSigOpen(false)} onSelect={(num, den) => { setSig({ num, den }); setSigOpen(false); }} />
+      <TempoDial visible={tempoOpen} bpm={bpm} onClose={() => setTempoOpen(false)} onChange={(v) => setBpm(Math.max(20, Math.min(300, Math.round(v))))} />
+      <LibraryBrowser visible={libOpen} library={library} mode={libMode} onClose={() => setLibOpen(false)} onChangeLibrary={onChangeLibrary} onPick={onPickFile} onImport={onImport} />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: theme.bg,
-    paddingTop: Platform.OS === 'android' ? RNStatusBar.currentHeight : 0,
-  },
+  safe: { flex: 1, backgroundColor: theme.bg, paddingTop: Platform.OS === 'android' ? RNStatusBar.currentHeight : 0 },
   body: { flex: 1, flexDirection: 'row', gap: 8, paddingHorizontal: 10, paddingVertical: 8 },
   gridWrap: { flex: 1 },
 });

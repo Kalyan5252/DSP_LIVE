@@ -27,9 +27,21 @@ export default class Transport {
   }
 
   configure({ bpm, num, den } = {}) {
-    if (bpm) this.bpm = bpm;
-    if (num) this.num = num;
-    if (den) this.den = den;
+    // Rebase the clock so a tempo/signature change while playing is smooth:
+    // keep the current musical position (beats elapsed) continuous instead of
+    // letting the bar/beat jump. This is what makes dragging the tempo dial
+    // slow down or speed up the running metronome in real time, like Remixlive.
+    if (this.playing) {
+      const beatsElapsed = this.positionSec() / this.beatSec(); // at old tempo
+      if (bpm) this.bpm = bpm;
+      if (num) this.num = num;
+      if (den) this.den = den;
+      this.startAt = this._now() - beatsElapsed * this.beatSec(); // at new tempo
+    } else {
+      if (bpm) this.bpm = bpm;
+      if (num) this.num = num;
+      if (den) this.den = den;
+    }
     this._emit();
   }
 

@@ -2,9 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { Animated, Pressable, Text, View, StyleSheet, Easing } from 'react-native';
 import { theme } from '../theme';
 
-// A pad that fills its grid cell (flex:1 — no fixed size, so the whole board
-// fits the screen). Matches the Remixlive look: empty pads are neutral, loaded
-// pads take the column color with a loop ring + name, the active pad is filled.
+// A pad that fills its grid cell (flex:1 — the whole board fits the screen).
 export default function Pad({ pad, color, isPlaying, isQueued, onPress, onLongPress }) {
   const empty = !pad || !pad.uri;
 
@@ -22,9 +20,7 @@ export default function Pad({ pad, color, isPlaying, isQueued, onPress, onLongPr
     return undefined;
   }, [isQueued, pulse]);
 
-  const bg = empty
-    ? theme.surface
-    : isPlaying ? color : withAlpha(color, 0.18);
+  const bg = empty ? theme.surface : isPlaying ? color : withAlpha(color, 0.18);
   const borderColor = isQueued
     ? pulse.interpolate({ inputRange: [0, 1], outputRange: [withAlpha(color, 0.4), color] })
     : empty ? theme.border : isPlaying ? color : withAlpha(color, 0.5);
@@ -43,7 +39,9 @@ export default function Pad({ pad, color, isPlaying, isQueued, onPress, onLongPr
           <Text style={styles.plus}>+</Text>
         ) : (
           <View style={styles.content}>
-            <Ring color={fg} filled={isPlaying} />
+            <View style={[styles.ring, { borderColor: fg }]}>
+              {isPlaying ? <View style={[styles.ringFill, { backgroundColor: fg }]} /> : null}
+            </View>
             <Text numberOfLines={2} style={[styles.name, { color: isPlaying ? '#12121A' : theme.text }]}>
               {pad.name}
             </Text>
@@ -54,15 +52,6 @@ export default function Pad({ pad, color, isPlaying, isQueued, onPress, onLongPr
   );
 }
 
-// The circular loop indicator drawn on loaded pads.
-function Ring({ color, filled }) {
-  return (
-    <View style={[styles.ring, { borderColor: color }]}>
-      {filled ? <View style={[styles.ringFill, { backgroundColor: color }]} /> : null}
-    </View>
-  );
-}
-
 function withAlpha(hex, a) {
   const v = Math.round(Math.max(0, Math.min(1, a)) * 255).toString(16).padStart(2, '0');
   return `${hex}${v}`;
@@ -70,7 +59,7 @@ function withAlpha(hex, a) {
 
 const styles = StyleSheet.create({
   cell: { flex: 1 },
-  pad: { flex: 1, borderRadius: 10, borderWidth: 1.5, paddingHorizontal: 7, justifyContent: 'center' },
+  pad: { flex: 1, borderRadius: 8, borderWidth: 1.5, paddingHorizontal: 7, justifyContent: 'center' },
   plus: { color: theme.textFaint, fontSize: 16, fontWeight: '300', alignSelf: 'center', opacity: 0.5 },
   content: { flexDirection: 'row', alignItems: 'center', gap: 7 },
   ring: { width: 15, height: 15, borderRadius: 7.5, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },

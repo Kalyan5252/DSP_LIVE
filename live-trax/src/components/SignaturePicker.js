@@ -3,16 +3,20 @@ import { Modal, View, Text, Pressable, StyleSheet } from 'react-native';
 import { theme } from '../theme';
 import { SIGNATURES } from '../config';
 
-// Time-signature chooser: the five presets plus a custom builder (numerator
-// stepper + /4 or /8 beat unit), so the user can customize the meter.
+// Time-signature chooser: presets plus a custom builder.
 export default function SignaturePicker({ visible, num, den, onClose, onSelect }) {
   const [cn, setCn] = useState(num);
   const [cd, setCd] = useState(den);
-
   useEffect(() => { setCn(num); setCd(den); }, [num, den, visible]);
 
   return (
-    <Modal visible={visible} transparent animationType="fade" supportedOrientations={["landscape","landscape-left","landscape-right","portrait"]} onRequestClose={onClose}>
+    <Modal
+      visible={visible}
+      transparent
+      animationType="fade"
+      supportedOrientations={['landscape', 'landscape-left', 'landscape-right', 'portrait']}
+      onRequestClose={onClose}
+    >
       <Pressable style={styles.backdrop} onPress={onClose}>
         <Pressable style={styles.card} onPress={() => {}}>
           <Text style={styles.heading}>Time signature</Text>
@@ -22,14 +26,8 @@ export default function SignaturePicker({ visible, num, den, onClose, onSelect }
             {SIGNATURES.map((s) => {
               const active = s.num === num && s.den === den;
               return (
-                <Pressable
-                  key={`${s.num}/${s.den}`}
-                  onPress={() => onSelect(s.num, s.den)}
-                  style={[styles.preset, active && styles.presetActive]}
-                >
-                  <Text style={[styles.presetText, active && { color: '#0E0E12' }]}>
-                    {s.num}/{s.den}
-                  </Text>
+                <Pressable key={`${s.num}/${s.den}`} onPress={() => onSelect(s.num, s.den)} style={[styles.preset, active && styles.presetActive]}>
+                  <Text style={[styles.presetText, active && { color: '#0E0E12' }]}>{s.num}/{s.den}</Text>
                 </Pressable>
               );
             })}
@@ -37,15 +35,15 @@ export default function SignaturePicker({ visible, num, den, onClose, onSelect }
 
           <Text style={styles.label}>CUSTOM</Text>
           <View style={styles.customRow}>
-            <Stepper value={cn} min={1} max={15} onChange={setCn} />
+            <View style={styles.stepper}>
+              <Pressable onPress={() => setCn(Math.max(1, cn - 1))} style={styles.stepBtn}><Text style={styles.stepBtnText}>−</Text></Pressable>
+              <Text style={styles.stepVal}>{cn}</Text>
+              <Pressable onPress={() => setCn(Math.min(15, cn + 1))} style={styles.stepBtn}><Text style={styles.stepBtnText}>+</Text></Pressable>
+            </View>
             <Text style={styles.slash}>/</Text>
             <View style={styles.denRow}>
               {[4, 8].map((d) => (
-                <Pressable
-                  key={d}
-                  onPress={() => setCd(d)}
-                  style={[styles.den, cd === d && styles.denActive]}
-                >
+                <Pressable key={d} onPress={() => setCd(d)} style={[styles.den, cd === d && styles.denActive]}>
                   <Text style={[styles.denText, cd === d && { color: '#0E0E12' }]}>{d}</Text>
                 </Pressable>
               ))}
@@ -60,33 +58,13 @@ export default function SignaturePicker({ visible, num, den, onClose, onSelect }
   );
 }
 
-function Stepper({ value, min, max, onChange }) {
-  return (
-    <View style={styles.stepper}>
-      <Pressable onPress={() => onChange(Math.max(min, value - 1))} style={styles.stepBtn}>
-        <Text style={styles.stepBtnText}>−</Text>
-      </Pressable>
-      <Text style={styles.stepVal}>{value}</Text>
-      <Pressable onPress={() => onChange(Math.min(max, value + 1))} style={styles.stepBtn}>
-        <Text style={styles.stepBtnText}>+</Text>
-      </Pressable>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
-  card: {
-    width: '86%', backgroundColor: theme.bgElevated, borderRadius: 18, padding: 20,
-    borderWidth: 1, borderColor: theme.border,
-  },
-  heading: { color: theme.text, fontSize: 17, fontWeight: '700', marginBottom: 16 },
+  card: { width: '80%', maxWidth: 520, backgroundColor: theme.bgElevated, borderRadius: 12, padding: 20, borderWidth: 1, borderColor: theme.border },
+  heading: { color: theme.text, fontSize: 16, fontWeight: '700', marginBottom: 14 },
   label: { color: theme.textDim, fontSize: 11, fontWeight: '700', letterSpacing: 1.2, marginBottom: 8, marginTop: 6 },
   presetRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 8 },
-  preset: {
-    paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10,
-    borderWidth: 1, borderColor: theme.border, backgroundColor: theme.surface,
-  },
+  preset: { paddingHorizontal: 14, paddingVertical: 10, borderRadius: 10, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.surface },
   presetActive: { backgroundColor: theme.accent, borderColor: theme.accent },
   presetText: { color: theme.text, fontWeight: '700', fontSize: 15 },
   customRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 4 },
