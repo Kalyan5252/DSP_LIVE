@@ -5,7 +5,9 @@ import { Pencil, Sliders, Fx, Folder } from './Icons';
 
 // Right icon rail. The fader at the top is a working MASTER VOLUME slider; edit /
 // mixer / FX are placeholders; the folder opens the library.
-export default function RightRail({ onOpenLibrary, volume, onVolume }) {
+// Memoized so the transport's per-beat re-renders don't re-render the fader
+// (which caused the slider to flicker while a loop was playing).
+function RightRail({ onOpenLibrary, volume, onVolume }) {
   return (
     <View style={styles.rail}>
       <MasterFader value={volume} onChange={onVolume} />
@@ -63,3 +65,5 @@ const styles = StyleSheet.create({
   faderHandle: { position: 'absolute', width: 26, height: 12, borderRadius: 6, backgroundColor: theme.text, borderWidth: 1, borderColor: theme.border },
   btn: { width: 40, height: 40, borderRadius: 8, backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border, alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
 });
+
+export default React.memo(RightRail);

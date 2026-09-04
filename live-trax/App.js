@@ -44,6 +44,7 @@ export default function App() {
   const queuedRef = useRef({});
   const padsRef = useRef({});
   const volumeRef = useRef(1);
+  const volApplyRef = useRef(0);
   padsRef.current = pads;
 
   const writePlaying = useCallback((next) => { playingRef.current = next; setPlaying(next); }, []);
@@ -111,6 +112,7 @@ export default function App() {
   // dial or fader doesn't hammer storage.
   useEffect(() => {
     const t = setTimeout(() => {
+      engine.setMasterVolume(volume); // trailing apply after the drag settles
       AsyncStorage.setItem(STORE_KEY, JSON.stringify({ pads: padsRef.current, bpm, sig, volume })).catch(() => {});
     }, 500);
     return () => clearTimeout(t);
@@ -120,7 +122,14 @@ export default function App() {
     AsyncStorage.setItem(STORE_KEY, JSON.stringify({ pads: nextPads, bpm, sig, volume: volumeRef.current })).catch(() => {});
   }, [bpm, sig]);
 
-  const onVolume = useCallback((v) => { volumeRef.current = v; setVolume(v); engine.setMasterVolume(v); }, []);
+  // Update the handle immediately (smooth), but apply the level to the audio
+  // engine at most ~every 60ms so dragging while loops play doesn't stutter.
+  const onVolume = useCallback((v) => {
+    volumeRef.current = v;
+    setVolume(v);
+    const now = Date.now();
+    if (now - volApplyRef.current > 60) { volApplyRef.current = now; engine.setMasterVolume(v); }
+  }, []);
 
   const onChangeLibrary = useCallback((next, opts) => {
     setLibrary(next);
