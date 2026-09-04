@@ -16,7 +16,7 @@ add_executable(padtest
 target_include_directories(padtest PRIVATE ${ENGINE_DIR})
 set(ALL_TARGETS padtest)
 
-# --- transport_demo: Phase 1 master-clock / time-signature harness ---
+# --- transport_demo: master-clock / time-signature harness ---
 add_executable(transport_demo
   transport_demo.cpp
   ${ENGINE_DIR}/Transport.cpp
@@ -25,20 +25,28 @@ add_executable(transport_demo
 target_include_directories(transport_demo PRIVATE ${ENGINE_DIR})
 list(APPEND ALL_TARGETS transport_demo)
 
-# --- stretch_demo: Phase 0 time-stretch proof (needs Signalsmith) ---
+# --- demos needing Signalsmith (time-stretch) ---
 if(EXISTS ${TP}/signalsmith-stretch/include/signalsmith-stretch/signalsmith-stretch.h)
+  # stretch_demo: Phase 0 stretch proof
   add_executable(stretch_demo
     stretch_demo.cpp
     ${ENGINE_DIR}/miniaudio_impl.cpp
   )
   target_include_directories(stretch_demo PRIVATE
-    ${ENGINE_DIR}
-    ${TP}/signalsmith-stretch/include
-    ${TP}
-  )
+    ${ENGINE_DIR} ${TP}/signalsmith-stretch/include ${TP})
   list(APPEND ALL_TARGETS stretch_demo)
+
+  # loop_demo: play a tempo-locked loop + metronome together
+  add_executable(loop_demo
+    loop_demo.cpp
+    ${ENGINE_DIR}/Transport.cpp
+    ${ENGINE_DIR}/miniaudio_impl.cpp
+  )
+  target_include_directories(loop_demo PRIVATE
+    ${ENGINE_DIR} ${TP}/signalsmith-stretch/include ${TP})
+  list(APPEND ALL_TARGETS loop_demo)
 else()
-  message(STATUS "Signalsmith not found in third_party/ - run fetch_deps.sh to enable stretch_demo")
+  message(STATUS "Signalsmith not found in third_party/ - run fetch_deps.sh to enable stretch_demo and loop_demo")
 endif()
 
 # --- platform audio libraries ---

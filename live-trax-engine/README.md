@@ -133,3 +133,34 @@ Verified: 4/4 bar = 2.0 s @120; 3/4 = 1.5 s; 6/8 = 1.5 s (accents 1 & 4);
 
 Next in Phase 1: fold this clock into the pad engine so tapped loops start on the
 next boundary, and pre-render each loop to the master tempo (the offline path).
+
+---
+
+## Play a loop + metronome together (`loop_demo`)
+
+Plays your audio sample **and** the metronome at the same time — the loop is
+tempo-locked to the master BPM (pitch preserved) so it stays with the click.
+
+```bash
+cd live-trax-engine
+bash fetch_deps.sh                 # needs miniaudio + Signalsmith
+cd standalone
+cmake -S . -B build && cmake --build build --target loop_demo
+
+# live: play your 1-bar loop with a 4/4 click at 120 BPM
+./build/loop_demo ~/Music/loops/pattern1.wav --bpm 120 --sig 4/4 --bars 1
+
+# a 7/8 groove at 140, loop is 2 bars long:
+./build/loop_demo ~/Music/loops/odd.wav --bpm 140 --sig 7/8 --bars 2
+
+# render loop+click to a WAV instead of live playback:
+./build/loop_demo ~/Music/loops/pattern1.wav --bpm 120 --sig 4/4 --bars 1 \
+    --seconds 8 --render mix.wav
+```
+
+Tempo-lock options: `--bars N` (loop is N bars — most reliable) or `--orig BPM`
+(loop was recorded at that tempo). Omit both to play as-is (may drift against the
+click). Other flags: `--seconds T`, `--no-metronome`, `--render OUT.wav`.
+
+Verified: clicks land exactly on the beat grid; an off-length loop is stretched
+to fill its bars (e.g. a 1.6 s loop → 2.0 s for one 4/4 bar at 120).
