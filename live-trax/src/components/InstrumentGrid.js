@@ -6,7 +6,11 @@ import { INSTRUMENTS, ROWS, padId } from '../config';
 // The whole board, sized with flex so all 8 columns x 6 rows fit the screen
 // with NO scrolling. Each column has a thin colored header strip (like the
 // reference) and stacks its variation pads underneath.
-export default function InstrumentGrid({ pads, playingByColumn, queuedByColumn, onPadPress, onPadLong }) {
+//
+// Play/armed highlight and the playhead ring come from the native transport
+// (each Pad subscribes to syncStore by id), so this grid does not re-render on
+// every audio frame.
+function InstrumentGrid({ pads, beats, onPadPress, onPadLong }) {
   return (
     <View style={styles.grid}>
       <View style={styles.headerRow}>
@@ -25,10 +29,10 @@ export default function InstrumentGrid({ pads, playingByColumn, queuedByColumn, 
               return (
                 <Pad
                   key={id}
+                  id={id}
                   pad={pads[id]}
                   color={inst.color}
-                  isPlaying={playingByColumn[inst.key] === rowIndex}
-                  isQueued={queuedByColumn[inst.key] === rowIndex}
+                  beats={beats}
                   onPress={() => onPadPress(inst, rowIndex)}
                   onLongPress={() => onPadLong(inst, rowIndex)}
                 />
@@ -56,3 +60,5 @@ const styles = StyleSheet.create({
   columns: { flex: 1, flexDirection: 'row', gap: GAP },
   column: { flex: 1, gap: GAP },
 });
+
+export default React.memo(InstrumentGrid);

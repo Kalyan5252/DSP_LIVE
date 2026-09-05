@@ -1,142 +1,161 @@
 // Audio core for Live Trax — the single seam the app talks to.
-// Backed by expo-audio (JS) today; the C++ engine will forward through this same
-// interface later. Owns audio playback AND the master clock (Transport).
+//
+// Audio + timing run in the NATIVE C++ engine (miniaudio) via the LiveTraxEngine
+// Expo module:
+//   - Real-time streaming time-stretch (Signalsmith) locks every loop to the
+//     master tempo with no audio break.
+//   - A sample-accurate transport (ma_engine clock) schedules quantized
+//     launch/stop on the audio thread, so pads fire on the grid boundary.
+//
+// JS is a *view* of the native clock: it reads getTransport() / getActivePads()
+// to drive the UI (beat indicator, armed pulse, playhead ring). The JS Transport
+// remains only as a graceful fallback when the native module isn't built yet.
 
-import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+import { requireNativeModule } from 'expo-modules-core';
 import Transport from '../transport';
+
+let Native = {};
+try { Native = requireNativeModule('LiveTraxEngine'); } catch (e) { console.warn('[engine] native module missing', e && e.message); }
+const hasNative = typeof Native.triggerSync === 'function';
+console.log('[engine] native fns -> triggerSync:', typeof Native.triggerSync, ' getTransport:', typeof Native.getTransport);
+
+function toPath(uri) {
+  if (!uri) return uri;
+  return uri.startsWith('file://') ? decodeURIComponent(uri.slice('file://'.length)) : uri;
+}
 
 class AudioEngine {
   constructor() {
-    this.entries = new Map(); // padId -> { player, sub, baseBpm, loaded, wantPlay }
-    this.listener = null;
-    this.configured = false;
+    this.transport = new Transport();     // fallback clock / UI mirror
     this.masterVolume = 1;
     this.masterBpm = 120;
-    this.transport = new Transport();
+    this.sigNum = 4;
+    this.sigDen = 4;
+    this.quantizeMode = 'bar';            // 'bar' | 'off'
+    this.loadedIds = new Set();
+    this.listener = null;
   }
 
+  async configure() { /* no-op; native handles the audio session */ }
+
+  setListener(fn) { this.listener = fn; }
+  _emit(id, playing) { if (this.listener) this.listener(id, playing); }
+
+  // ---- master controls ----
   setMasterVolume(v) {
     this.masterVolume = Math.max(0, Math.min(1, v));
-    for (const [, e] of this.entries) {
-      try { e.player.volume = this.masterVolume; } catch (err) { /* released */ }
-    }
+    try { Native.setMasterVolume(this.masterVolume); } catch (e) { /* not built */ }
   }
 
-  setMasterTempo(bpm) { if (bpm > 0) this.masterBpm = bpm; this.transport.configure({ bpm }); }
-  setMasterSignature(num, den) { this.transport.configure({ num, den }); }
-  setQuantize(q) { this.transport.setQuantize(q); }
+  setMasterTempo(bpm) {
+    if (bpm > 0) this.masterBpm = bpm;
+    this.transport.configure({ bpm });
+    try { Native.setMasterTempo(bpm); } catch (e) { /* not built */ }
+  }
 
-  startClock() { this.transport.start(); }
-  stopClock() { this.transport.stop(); }
-  toggleClock() { this.transport.toggle(); }
+  setMasterSignature(num, den) {
+    if (num > 0) this.sigNum = num;
+    if (den > 0) this.sigDen = den;
+    this.transport.configure({ num, den });
+    try { Native.setMasterSignature(this.sigNum, this.sigDen); } catch (e) { /* not built */ }
+    this._pushQuantize(); // 'bar' quantum depends on the signature
+  }
+
+  applyTempo() { try { Native.applyTempo(); } catch (e) {} }
+
+  // quantize is a UI mode ('bar' | 'off'); the native quantum is in beats.
+  setQuantize(q) {
+    this.quantizeMode = q;
+    this.transport.setQuantize(q);
+    this._pushQuantize();
+  }
+  _pushQuantize() {
+    const beats = this.quantizeMode === 'bar' ? this.sigNum : 0;
+    try { Native.setQuantize(beats); } catch (e) { /* not built */ }
+  }
+
+  // ---- clock ----
+  startClock() {
+    this.transport.start();
+    try { Native.startTransport(); } catch (e) {}
+  }
+  stopClock() {
+    this.transport.stop();
+    try { Native.stopTransport(); } catch (e) {}
+  }
+  toggleClock() { this.isClockPlaying() ? this.stopClock() : this.startClock(); }
   isClockPlaying() { return this.transport.playing; }
   subscribeBeat(fn) { return this.transport.subscribe(fn); }
   onBar(fn) { return this.transport.onBar(fn); }
   disposeClock() { this.transport.dispose(); }
 
-  schedule(fn) {
-    if (this.transport.playing && this.transport.quantize === 'bar') {
-      const off = this.transport.onBar(() => { off(); fn(); });
-    } else { fn(); }
-  }
+  // ---- native transport readout (for the UI poll) ----
+  hasNativeTransport() { return hasNative && typeof Native.getTransport === 'function'; }
 
-  async configure() {
-    if (this.configured) return;
+  // { playing, barIndex, beatInBar, phase, beatsPerBar } or null.
+  getTransport() {
     try {
-      await setAudioModeAsync({
-        playsInSilentMode: true,
-        shouldPlayInBackground: false,
-        interruptionMode: 'mixWithOthers',
-      });
-      this.configured = true;
-      console.log('[engine] audio session configured');
-    } catch (e) { console.warn('[engine] configure FAILED', e && e.message); }
-  }
-
-  setListener(fn) { this.listener = fn; }
-  _emit(padId, isPlaying) { if (this.listener) this.listener(padId, isPlaying); }
-
-  async load(padId, uri, opts = {}) {
-    this.unload(padId);
-    const { bpm, loop } = opts;
-    console.log('[engine] load', padId, 'uri=', uri);
-    const player = createAudioPlayer({ uri });
-    player.loop = !!loop;
-    try { player.volume = this.masterVolume; } catch (err) { /* ignore */ }
-
-    const entry = { player, sub: null, baseBpm: bpm > 0 ? bpm : this.masterBpm, loaded: false, wantPlay: false };
-
-    entry.sub = player.addListener('playbackStatusUpdate', (status) => {
-      if (!status) return;
-      // Fire the play as soon as the file finishes loading (fixes tap-before-ready).
-      if (status.isLoaded && !entry.loaded) {
-        entry.loaded = true;
-        console.log('[engine] loaded', padId, 'dur=', status.duration);
-        if (entry.wantPlay) {
-          entry.wantPlay = false;
-          player.seekTo(0);
-          player.play();
-          this._emit(padId, true);
-        }
+      const a = Native.getTransport();
+      if (a && a.length >= 5) {
+        return { playing: a[0] > 0.5, barIndex: a[1] | 0, beatInBar: a[2] | 0, phase: a[3], beatsPerBar: a[4] | 0 };
       }
-      if (status.didJustFinish && !player.loop) this._emit(padId, false);
-    });
-
-    this.entries.set(padId, entry);
+    } catch (e) { /* fall through */ }
+    return null;
   }
 
-  getBaseBpm(padId) { const e = this.entries.get(padId); return e ? e.baseBpm : this.masterBpm; }
-  setLoop(padId, loop) { const e = this.entries.get(padId); if (e) e.player.loop = !!loop; }
-  isLoaded(padId) { return this.entries.has(padId); }
+  // { padId: { s: 1|2, p: 0..1 } }  (s: 1=armed, 2=playing)
+  getActivePads() {
+    try {
+      const raw = Native.getActivePads();
+      if (raw) return JSON.parse(raw);
+    } catch (e) { /* fall through */ }
+    return {};
+  }
 
-  trigger(padId) {
-    const e = this.entries.get(padId);
-    if (!e) return;
-    const { player } = e;
-    if (player.playing) {
-      player.pause();
-      player.seekTo(0);
-      this._emit(padId, false);
-    } else if (e.loaded || player.isLoaded) {
-      player.seekTo(0);
-      player.play();
-      console.log('[engine] play', padId, 'playing=', player.playing);
-      this._emit(padId, true);
-    } else {
-      // Not loaded yet — remember the intent and play when loading finishes.
-      e.wantPlay = true;
-      console.log('[engine] waiting for load', padId);
-      this._emit(padId, true);
+  // ---- pads ----
+  async load(padId, uri, opts = {}) {
+    const { bpm, loop } = opts;
+    const path = toPath(uri);
+    try {
+      Native.loadPad(padId, path, bpm > 0 ? bpm : this.masterBpm, loop === undefined ? true : !!loop);
+      this.loadedIds.add(padId);
+    } catch (e) {
+      console.warn('[engine] loadPad failed', e && e.message);
     }
+  }
+
+  getBaseBpm(padId) { return this.masterBpm; }
+  setLoop(padId, loop) { /* set at load time in native */ }
+  isLoaded(padId) { return this.loadedIds.has(padId); }
+
+  // Quantized by the native transport: fires on the next grid boundary while the
+  // transport plays; near-immediate when stopped or quantize is off.
+  trigger(padId) {
+    try {
+      if (hasNative) Native.triggerSync(padId);
+      else Native.trigger(padId);
+    } catch (e) { /* ignore */ }
   }
 
   stop(padId) {
-    const e = this.entries.get(padId);
-    if (!e) return;
-    e.wantPlay = false;
-    e.player.pause();
-    e.player.seekTo(0);
-    this._emit(padId, false);
+    try {
+      if (hasNative) Native.stopSync(padId);
+      else Native.stopPad(padId);
+    } catch (e) { /* ignore */ }
   }
 
-  stopAll() {
-    for (const [padId, e] of this.entries) {
-      e.wantPlay = false;
-      e.player.pause();
-      e.player.seekTo(0);
-      this._emit(padId, false);
-    }
-  }
+  // Immediate, unquantized (used by Stop-All).
+  hardStop(padId) { try { Native.stopPad(padId); } catch (e) {} }
+
+  stopAll() { try { Native.stopAll(); } catch (e) {} }
 
   unload(padId) {
-    const e = this.entries.get(padId);
-    if (!e) return;
-    try { if (e.sub && e.sub.remove) e.sub.remove(); e.player.remove(); } catch (err) { /* released */ }
-    this.entries.delete(padId);
+    try { Native.unloadPad(padId); } catch (e) {}
+    this.loadedIds.delete(padId);
   }
 
   unloadAll() {
-    for (const padId of Array.from(this.entries.keys())) this.unload(padId);
+    for (const id of Array.from(this.loadedIds)) this.unload(id);
   }
 }
 
