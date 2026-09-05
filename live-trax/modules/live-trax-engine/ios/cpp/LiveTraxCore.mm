@@ -47,6 +47,7 @@ struct StretchVoice {
   // scheduling / UI state (engine-frame absolutes)
   ma_uint64 startFrame = 0;      // frame the voice (will) start playing
   ma_uint64 stopFrame = kNoStop; // frame the voice is scheduled to stop
+  std::atomic<long long> pendingInPos{-1}; // phase-align: input pos to jump to on first read
 
   void allocScratch() {
     int cap = kMaxBlock * (int)std::ceil(kMaxRatio) + 8;
@@ -65,6 +66,12 @@ static ma_result voice_read(ma_data_source* ds, void* pOut, ma_uint64 frameCount
   StretchVoice* v = (StretchVoice*)ds;
   float* out = (float*)pOut;
   const int ch = v->channels;
+
+  // Phase-locked launch: jump to the grid-aligned input position exactly when
+  // playback actually begins (first read after the scheduled start), so a column
+  // switch continues from the same slice instead of restarting from 0.
+  long long pend = v->pendingInPos.exchange(-1);
+  if (pend >= 0) { v->inPos = (ma_uint64)pend; v->ended = false; v->stretch.reset(); }
 
   if (v->ended) { if (pRead) *pRead = 0; return MA_AT_END; }
 
@@ -258,6 +265,7 @@ void LiveTraxCore::trigger(const std::string& id) {
   StretchVoice* v = it->second.get();
   ma_sound_stop(&v->sound);
   ma_sound_seek_to_pcm_frame(&v->sound, 0);
+  v->pendingInPos.store(-1);
   ma_sound_set_start_time_in_pcm_frames(&v->sound, 0);
   ma_sound_set_stop_time_in_pcm_frames(&v->sound, kNoStop);
   v->startFrame = impl_->now();
@@ -293,17 +301,50 @@ void LiveTraxCore::triggerSync(const std::string& id) {
   if (it == impl_->pads.end() || !it->second->hasSound) return;
   StretchVoice* v = it->second.get();
 
+  // "Fresh" = nothing else is currently sounding. The first loop to start defines
+  // the grid origin (it begins at 0); every loop launched while something is
+  // already playing phase-locks to that same origin, so a column switch continues
+  // from the SAME position — seamless live mixing, with or without the transport.
+  bool fresh = true;
+  for (auto& kv : impl_->pads) {
+    StretchVoice* o = kv.second.get();
+    if (o == v || !o->hasSound) continue;
+    if (ma_sound_is_playing(&o->sound)) { fresh = false; break; }
+  }
+
   bool quantized = impl_->transportPlaying && impl_->quantumFrames() > 0;
   ma_uint64 n = impl_->now();
-  ma_uint64 startAt = quantized ? impl_->nextBoundary() : 0; // 0 => immediate (in the past)
+  ma_uint64 startAt = quantized ? impl_->nextBoundary() : n; // absolute frame playback begins
+  ma_uint64 startTime = quantized ? startAt : 0;             // 0 => play now
+
+  if (fresh) impl_->transportStart = startAt; // this launch defines the grid origin
+
+  // Phase-lock to the grid origin: seek the loop to the position it "would" be at
+  // now, so it drops in continuous with whatever is already playing.
+  ma_uint64 inStart = 0;
+  ma_uint64 startFrame = startAt;
+  if (v->origFrames > 0) {
+    double r = std::min(kMaxRatio, std::max(kMinRatio, impl_->ratioFor(v)));
+    double loopOut = r > 0 ? (double)v->origFrames / r : 0.0; // output frames per loop
+    if (loopOut > 0) {
+      double elapsed = (double)(startAt - impl_->transportStart);
+      double phaseOut = std::fmod(elapsed, loopOut);
+      if (phaseOut < 0) phaseOut += loopOut;
+      double phi = phaseOut / loopOut;
+      inStart = (ma_uint64)((double)v->origFrames * phi);
+      if (inStart >= v->origFrames) inStart = 0;
+      startFrame = startAt - (ma_uint64)std::llround(phaseOut); // so display phase aligns
+    }
+  }
 
   ma_sound_stop(&v->sound);
-  ma_sound_seek_to_pcm_frame(&v->sound, 0);
+  ma_sound_seek_to_pcm_frame(&v->sound, 0); // resets stretch + inPos
+  v->pendingInPos.store((long long)inStart); // applied on the first read at startTime
   ma_sound_set_stop_time_in_pcm_frames(&v->sound, kNoStop);
-  ma_sound_set_start_time_in_pcm_frames(&v->sound, startAt);
-  v->startFrame = quantized ? startAt : n;
+  ma_sound_set_start_time_in_pcm_frames(&v->sound, startTime);
+  v->startFrame = startFrame;
   v->stopFrame = kNoStop;
-  ma_sound_start(&v->sound);
+  ma_sound_start(&v->sound); // silent until engine time reaches startTime
 }
 
 void LiveTraxCore::stopSync(const std::string& id) {
@@ -419,7 +460,12 @@ double LiveTraxCore::estimateBpm(const std::string& path) {
 
 // ---- transport / sync ----
 void LiveTraxCore::startTransport() {
-  impl_->transportStart = impl_->now();
+  // Only (re)anchor the grid when nothing is playing, so pressing Play mid-mix
+  // doesn't shift the phase of loops already running.
+  bool anyPlaying = false;
+  for (auto& kv : impl_->pads)
+    if (kv.second->hasSound && ma_sound_is_playing(&kv.second->sound)) { anyPlaying = true; break; }
+  if (!anyPlaying) impl_->transportStart = impl_->now();
   impl_->transportPlaying = true;
 }
 

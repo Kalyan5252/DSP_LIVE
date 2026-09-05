@@ -190,8 +190,10 @@ export default function App() {
     if (activeRow === rowIndex) {
       engine.stop(id); // finishes to the next boundary
     } else {
-      if (activeRow != null) engine.stop(padId(inst.key, activeRow));
+      // Start the new loop FIRST so it phase-locks to the still-playing outgoing
+      // loop (continues from the same position), then stop the old one.
       engine.trigger(id);
+      if (activeRow != null) engine.stop(padId(inst.key, activeRow));
       syncStore.markArmed(id); // optimistic: pulse immediately
     }
   }, []);
