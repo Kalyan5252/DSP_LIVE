@@ -36,6 +36,8 @@ struct StretchVoice {
 
   // audio-thread state
   ma_uint64 inPos = 0;
+  std::atomic<ma_uint64> playPos{0}; // published real playhead (input frames), read by UI
+  int inLatency = 0;                 // stretch input latency (frames) for playhead correction
   bool ended = false;
   signalsmith::stretch::SignalsmithStretch<float> stretch;
   std::vector<std::vector<float>> inCh, outCh; // scratch (pre-allocated)
@@ -71,7 +73,7 @@ static ma_result voice_read(ma_data_source* ds, void* pOut, ma_uint64 frameCount
   // playback actually begins (first read after the scheduled start), so a column
   // switch continues from the same slice instead of restarting from 0.
   long long pend = v->pendingInPos.exchange(-1);
-  if (pend >= 0) { v->inPos = (ma_uint64)pend; v->ended = false; v->stretch.reset(); }
+  if (pend >= 0) { v->inPos = (ma_uint64)pend; v->ended = false; v->stretch.reset(); v->playPos.store(v->inPos); }
 
   if (v->ended) { if (pRead) *pRead = 0; return MA_AT_END; }
 
@@ -103,6 +105,7 @@ static ma_result voice_read(ma_data_source* ds, void* pOut, ma_uint64 frameCount
     if (!v->loop && v->inPos >= v->origFrames) { /* keep draining tail this call */ }
   }
 
+  v->playPos.store(v->inPos); // publish the true playhead for the UI
   if (pRead) *pRead = frameCount;
   return MA_SUCCESS;
 }
@@ -234,6 +237,7 @@ bool LiveTraxCore::loadPad(const std::string& id, const std::string& path, doubl
   if (!impl_->decode(path, v.get())) return false;
   v->allocScratch();
   v->stretch.presetDefault(v->channels, (float)v->sampleRate);
+  v->inLatency = v->stretch.inputLatency();
   v->ratio.store(impl_->ratioFor(v.get()));
 
   ma_data_source_config dsc = ma_data_source_config_init();
@@ -519,20 +523,16 @@ const char* LiveTraxCore::activePadsJSON() {
     else state = 2;                                                   // playing
     if (state == 0) continue;
 
-    // Loop phase (0..1) straight from the audio playhead, so the UI highlight
-    // wraps exactly when the loop repeats — locked to what is heard, not a
-    // free-running counter. The slice COUNT is derived in JS from the loop's
-    // own bpm + duration (see padDuration), so it never depends on the project
-    // signature.
+    // Loop phase (0..1) taken straight from the REAL audio playhead (the input
+    // read position on the audio thread), not reconstructed from elapsed time and
+    // tempo. This is tempo-history-independent, so changing tempo in real time
+    // moves the highlight continuously with the audio instead of jumping.
     double ph = 0.0;
-    if (state == 2) {
-      double r = std::min(kMaxRatio, std::max(kMinRatio, v->ratio.load()));
-      double loopOut = r > 0 ? (double)v->origFrames / r : 0.0; // output frames per loop
-      if (loopOut > 0) {
-        double elapsed = (double)(n - v->startFrame);
-        ph = std::fmod(elapsed, loopOut) / loopOut;
-        if (ph < 0) ph += 1.0;
-      }
+    if (state == 2 && v->origFrames > 0) {
+      long long of = (long long)v->origFrames;
+      long long heard = (long long)v->playPos.load() - (long long)v->inLatency; // what's audible now
+      heard %= of; if (heard < 0) heard += of;
+      ph = (double)heard / (double)of;
     }
 
     if (!first) buf += ",";
