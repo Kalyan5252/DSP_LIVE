@@ -33,6 +33,7 @@ class AudioEngine {
     this.sigDen = 4;
     this.quantizeMode = 'bar';            // 'bar' | 'off'
     this.loadedIds = new Set();
+    this.durations = new Map(); // padId -> loop length (seconds)
     this.listener = null;
   }
 
@@ -52,6 +53,8 @@ class AudioEngine {
     this.transport.configure({ bpm });
     try { Native.setMasterTempo(bpm); } catch (e) { /* not built */ }
   }
+
+  setPadBpm(padId, bpm) { try { Native.setPadBpm(padId, bpm > 0 ? bpm : this.masterBpm); } catch (e) { /* not built */ } }
 
   setMasterSignature(num, den) {
     if (num > 0) this.sigNum = num;
@@ -119,9 +122,22 @@ class AudioEngine {
     try {
       Native.loadPad(padId, path, bpm > 0 ? bpm : this.masterBpm, loop === undefined ? true : !!loop);
       this.loadedIds.add(padId);
+      let dur = 0;
+      try { dur = Native.padDuration(padId) || 0; } catch (e) { /* older binary */ }
+      this.durations.set(padId, dur);
+      return dur;
     } catch (e) {
       console.warn('[engine] loadPad failed', e && e.message);
+      return 0;
     }
+  }
+
+  // Loop length in seconds (0 if unknown).
+  durationOf(padId) { return this.durations.get(padId) || 0; }
+
+  // Analyze a file and return its detected BPM (0 if it couldn't be determined).
+  estimateBpm(uri) {
+    try { return Native.estimateBpm(toPath(uri)) || 0; } catch (e) { return 0; }
   }
 
   getBaseBpm(padId) { return this.masterBpm; }
@@ -152,6 +168,7 @@ class AudioEngine {
   unload(padId) {
     try { Native.unloadPad(padId); } catch (e) {}
     this.loadedIds.delete(padId);
+    this.durations.delete(padId);
   }
 
   unloadAll() {

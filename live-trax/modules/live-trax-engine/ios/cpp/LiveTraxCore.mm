@@ -331,7 +331,91 @@ void LiveTraxCore::setMasterTempo(double bpm) {
   for (auto& kv : impl_->pads) kv.second->ratio.store(impl_->ratioFor(kv.second.get()));
 }
 
+// Change one loop's own (base) tempo and re-lock its stretch ratio live, so the
+// slice count (JS, from bpm+duration) and the tempo-match both update with no
+// break in playback.
+void LiveTraxCore::setPadBpm(const std::string& id, double bpm) {
+  auto it = impl_->pads.find(id);
+  if (it == impl_->pads.end()) return;
+  StretchVoice* v = it->second.get();
+  v->baseBpm = bpm > 0 ? bpm : impl_->masterBpm;
+  v->ratio.store(impl_->ratioFor(v));
+}
+
 void LiveTraxCore::applyTempo() { setMasterTempo(impl_->masterBpm); }
+
+double LiveTraxCore::padDuration(const std::string& id) {
+  auto it = impl_->pads.find(id);
+  if (it == impl_->pads.end()) return 0.0;
+  StretchVoice* v = it->second.get();
+  if (v->sampleRate <= 0) return 0.0;
+  return (double)v->origFrames / (double)v->sampleRate;
+}
+
+// Automatic tempo (BPM) detection for an imported file.
+//   1. decode -> mono
+//   2. onset-energy novelty envelope (rectified energy difference per hop)
+//   3. autocorrelation of the envelope -> dominant beat period (70..180 BPM)
+//   4. loops are an exact number of beats, so snap to the BPM that makes the
+//      loop length a whole number of beats (turns 87.6 into a clean 88), then
+//      fold into a musical range.
+double LiveTraxCore::estimateBpm(const std::string& path) {
+  ma_decoder_config dc = ma_decoder_config_init(ma_format_f32, 1, 0); // force mono
+  ma_decoder dec;
+  if (ma_decoder_init_file(path.c_str(), &dc, &dec) != MA_SUCCESS) return 0.0;
+  ma_uint32 sr = dec.outputSampleRate;
+  ma_uint64 total = 0;
+  ma_decoder_get_length_in_pcm_frames(&dec, &total);
+  if (total == 0 || sr == 0) { ma_decoder_uninit(&dec); return 0.0; }
+  std::vector<float> mono((size_t)total, 0.f);
+  ma_uint64 read = 0;
+  ma_decoder_read_pcm_frames(&dec, mono.data(), total, &read);
+  ma_decoder_uninit(&dec);
+  if (read < (ma_uint64)sr / 2) return 0.0; // < 0.5s, too short to analyze
+  double durationSec = (double)read / (double)sr;
+
+  // ---- onset-energy novelty envelope ----
+  const int H = 256; // hop
+  int nFrames = (int)(read / H);
+  if (nFrames < 8) return 0.0;
+  std::vector<float> env(nFrames, 0.f);
+  double prev = 0.0;
+  for (int i = 0; i < nFrames; ++i) {
+    double e = 0.0;
+    const float* p = &mono[(size_t)i * H];
+    int nn = (int)std::min<ma_uint64>(H, read - (ma_uint64)i * H);
+    for (int j = 0; j < nn; ++j) e += (double)p[j] * (double)p[j];
+    double nov = e - prev; if (nov < 0) nov = 0;
+    env[i] = (float)nov;
+    prev = e;
+  }
+  double mean = 0.0; for (float x : env) mean += x; mean /= (double)nFrames;
+  for (auto& x : env) x = (float)std::max(0.0, (double)x - mean); // subtract DC
+
+  // ---- autocorrelation over the musical BPM range ----
+  double frameRate = (double)sr / (double)H;
+  int minLag = (int)std::floor(frameRate * 60.0 / 180.0);
+  int maxLag = (int)std::ceil (frameRate * 60.0 / 70.0);
+  if (minLag < 1) minLag = 1;
+  if (maxLag > nFrames - 1) maxLag = nFrames - 1;
+  double bestScore = -1.0, bestBpm = 0.0;
+  for (int lag = minLag; lag <= maxLag; ++lag) {
+    double s = 0.0;
+    for (int i = lag; i < nFrames; ++i) s += (double)env[i] * (double)env[i - lag];
+    if (s > bestScore) { bestScore = s; bestBpm = 60.0 * frameRate / (double)lag; }
+  }
+  if (bestBpm <= 0.0) return 0.0;
+
+  // ---- loop-length snap: exact BPM from an integer beat count ----
+  double beatPeriod = 60.0 / bestBpm;
+  long beats = (long)std::lround(durationSec / beatPeriod);
+  if (beats < 1) beats = 1;
+  double bpm = (double)beats * 60.0 / durationSec;
+  while (bpm < 70.0 && beats * 2 <= 1024) { beats *= 2; bpm = (double)beats * 60.0 / durationSec; }
+  while (bpm > 170.0 && beats % 2 == 0)   { beats /= 2; bpm = (double)beats * 60.0 / durationSec; }
+  bpm = std::round(bpm * 100.0) / 100.0; // 2 decimals
+  return bpm;
+}
 
 // ---- transport / sync ----
 void LiveTraxCore::startTransport() {
@@ -389,18 +473,19 @@ const char* LiveTraxCore::activePadsJSON() {
     else state = 2;                                                   // playing
     if (state == 0) continue;
 
-    // Current beat within the bar (0..num-1) — the ring highlights this beat.
-    // The loop plays stretched to the master tempo, so beats advance at masterBpm.
-    int bt = -1;
+    // Loop phase (0..1) straight from the audio playhead, so the UI highlight
+    // wraps exactly when the loop repeats — locked to what is heard, not a
+    // free-running counter. The slice COUNT is derived in JS from the loop's
+    // own bpm + duration (see padDuration), so it never depends on the project
+    // signature.
+    double ph = 0.0;
     if (state == 2) {
-      double fpb = impl_->framesPerBeat();
-      int num = impl_->sigNum > 0 ? impl_->sigNum : 4;
-      if (fpb > 0) {
-        double beats = (double)(n - v->startFrame) / fpb;
-        long b = (long)std::floor(beats);
-        bt = (int)(((b % num) + num) % num);
-      } else {
-        bt = 0;
+      double r = std::min(kMaxRatio, std::max(kMinRatio, v->ratio.load()));
+      double loopOut = r > 0 ? (double)v->origFrames / r : 0.0; // output frames per loop
+      if (loopOut > 0) {
+        double elapsed = (double)(n - v->startFrame);
+        ph = std::fmod(elapsed, loopOut) / loopOut;
+        if (ph < 0) ph += 1.0;
       }
     }
 
@@ -410,8 +495,8 @@ const char* LiveTraxCore::activePadsJSON() {
     buf += kv.first;
     buf += "\":{\"s\":";
     buf += std::to_string(state);
-    buf += ",\"bt\":";
-    buf += std::to_string(bt);
+    buf += ",\"ph\":";
+    buf += std::to_string(ph);
     buf += "}";
   }
   buf += "}";

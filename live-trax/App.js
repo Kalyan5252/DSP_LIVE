@@ -57,8 +57,12 @@ export default function App() {
             setPads(saved.pads);
             for (const id of Object.keys(saved.pads)) {
               const p = saved.pads[id];
-              if (p?.uri) await engine.load(id, p.uri, { bpm: p.bpm || saved.bpm, loop: true });
+              if (p?.uri) {
+                const dur = await engine.load(id, p.uri, { bpm: p.bpm || saved.bpm, loop: true });
+                saved.pads[id] = { ...p, durationSec: dur };
+              }
             }
+            if (mounted) setPads({ ...saved.pads });
           }
         } else {
           engine.setMasterSignature(4, 4);
@@ -114,7 +118,28 @@ export default function App() {
     setLibrary(next);
     AsyncStorage.setItem(LIB_KEY, JSON.stringify(next)).catch(() => {});
     if (opts && opts.uris) opts.uris.forEach((u) => deleteSampleFile(u));
-  }, []);
+
+    // Keep board pads in sync with library edits: if a file's BPM changed, every
+    // pad using that file re-slices (ring) and re-locks its stretch (audio), live.
+    const byUri = {};
+    Object.values(next.files || {}).forEach((f) => { byUri[f.uri] = f; });
+    setPads((prev) => {
+      let changed = false;
+      const out = { ...prev };
+      for (const id of Object.keys(prev)) {
+        const p = prev[id];
+        const f = p && p.uri ? byUri[p.uri] : null;
+        if (f && (f.bpm || null) !== (p.bpm || null)) {
+          out[id] = { ...p, bpm: f.bpm || null };
+          engine.setPadBpm(id, f.bpm > 0 ? f.bpm : 0);
+          changed = true;
+        }
+      }
+      if (!changed) return prev;
+      persist(out);
+      return out;
+    });
+  }, [persist]);
 
   const onImport = useCallback(async (folderId) => {
     try {
@@ -123,7 +148,12 @@ export default function App() {
       const asset = res.assets[0];
       const uri = await importSampleFile(asset.uri, asset.name || 'loop');
       const name = (asset.name || 'Loop').replace(/\.[^.]+$/, '');
-      const { lib } = addFile(library, { name, uri, bpm }, folderId);
+      // Detect the loop's real BPM from the audio; fall back to the master tempo
+      // only if detection fails (the user can still correct it in the library).
+      let detected = 0;
+      try { detected = engine.estimateBpm(uri); } catch (e) { detected = 0; }
+      const loopBpm = detected > 0 ? detected : bpm;
+      const { lib } = addFile(library, { name, uri, bpm: loopBpm }, folderId);
       onChangeLibrary(lib);
     } catch (e) { /* ignore */ }
   }, [library, onChangeLibrary, bpm]);
@@ -134,7 +164,14 @@ export default function App() {
     const id = padId(target.instKey, target.rowIndex);
     const loopBpm = file.bpm || bpm;
     setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name, bpm: file.bpm || null } }; persist(next); return next; });
-    engine.load(id, file.uri, { bpm: loopBpm, loop: true });
+    engine.load(id, file.uri, { bpm: loopBpm, loop: true }).then((dur) => {
+      setPads((prev) => {
+        if (!prev[id]) return prev;
+        const next = { ...prev, [id]: { ...prev[id], durationSec: dur } };
+        persist(next);
+        return next;
+      });
+    });
     setLibOpen(false);
   }, [persist, bpm]);
 
@@ -193,7 +230,7 @@ export default function App() {
 
       <View style={styles.body}>
         <View style={styles.gridWrap}>
-          <InstrumentGrid pads={pads} beats={sig.num} onPadPress={onPadPress} onPadLong={onPadLong} />
+          <InstrumentGrid pads={pads} den={sig.den} onPadPress={onPadPress} onPadLong={onPadLong} />
         </View>
         <RightRail onStopAll={onStopAll} onOpenLibrary={openLibraryManage} volume={volume} onVolume={onVolume} />
       </View>

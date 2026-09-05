@@ -10,7 +10,7 @@ import { INSTRUMENTS, ROWS, padId } from '../config';
 // Play/armed highlight and the playhead ring come from the native transport
 // (each Pad subscribes to syncStore by id), so this grid does not re-render on
 // every audio frame.
-function InstrumentGrid({ pads, beats, onPadPress, onPadLong }) {
+function InstrumentGrid({ pads, den, onPadPress, onPadLong }) {
   return (
     <View style={styles.grid}>
       <View style={styles.headerRow}>
@@ -32,7 +32,7 @@ function InstrumentGrid({ pads, beats, onPadPress, onPadLong }) {
                   id={id}
                   pad={pads[id]}
                   color={inst.color}
-                  beats={beats}
+                  den={den}
                   onPress={() => onPadPress(inst, rowIndex)}
                   onLongPress={() => onPadLong(inst, rowIndex)}
                 />

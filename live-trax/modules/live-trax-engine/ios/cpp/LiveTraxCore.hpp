@@ -34,6 +34,7 @@ public:
 
   void setMasterVolume(float v);
   void setMasterTempo(double bpm); // live streaming ratio; no restart
+  void setPadBpm(const std::string& id, double bpm); // change one loop's base tempo (live re-stretch)
   void applyTempo();
 
   // ---- transport / sync ----
@@ -45,6 +46,8 @@ public:
   // Readouts for the UI (polled from JS).
   //   which: 0=playing(0/1) 1=barIndex 2=beatInBar 3=phaseInBeat(0..1) 4=beatsPerBar
   double transportInfo(int which);
+  double padDuration(const std::string& id); // loop length in seconds (0 if none)
+  double estimateBpm(const std::string& path);   // analyze a file, return detected BPM (0 if unknown)
   // JSON of non-stopped pads: {"id":{"s":state,"p":phase}} state 1=armed 2=playing
   const char* activePadsJSON();
 
