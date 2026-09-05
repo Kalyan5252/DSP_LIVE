@@ -31,7 +31,8 @@
       }
     },
     "plugins": [
-      "expo-audio"
+      "expo-audio",
+      "expo-asset"
     ],
     "newArchEnabled": true
   }

@@ -15,6 +15,10 @@ import RightRail from './src/components/RightRail';
 import SignaturePicker from './src/components/SignaturePicker';
 import TempoDial from './src/components/TempoDial';
 import LibraryBrowser from './src/components/LibraryBrowser';
+import LiveTraxEngine from './modules/live-trax-engine';
+
+// TEMP plumbing test — remove once native module is confirmed
+console.log('[LiveTraxEngine]', LiveTraxEngine.hello());
 
 const STORE_KEY = 'livetrax.board.v1';
 const LIB_KEY = 'livetrax.library.v1';
