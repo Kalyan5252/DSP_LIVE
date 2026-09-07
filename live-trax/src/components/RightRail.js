@@ -7,11 +7,11 @@ import { Pencil, Sliders, Fx, Folder } from './Icons';
 // mixer / FX are placeholders; the folder opens the library.
 // Memoized so the transport's per-beat re-renders don't re-render the fader
 // (which caused the slider to flicker while a loop was playing).
-function RightRail({ onOpenLibrary, volume, onVolume }) {
+function RightRail({ onOpenLibrary, volume, onVolume, editActive, onToggleEdit }) {
   return (
     <View style={styles.rail}>
       <MasterFader value={volume} onChange={onVolume} />
-      <View style={styles.btn}><Pencil size={18} color={theme.textDim} /></View>
+      <Pressable style={[styles.btn, editActive && styles.btnActive]} onPress={onToggleEdit}><Pencil size={18} color={editActive ? '#0E0E12' : theme.textDim} /></Pressable>
       <View style={styles.btn}><Sliders size={18} color={theme.textDim} /></View>
       <View style={styles.btn}><Fx size={16} color={theme.textDim} /></View>
       <Pressable style={styles.btn} onPress={onOpenLibrary}><Folder size={18} color={theme.text} /></Pressable>
@@ -64,6 +64,7 @@ const styles = StyleSheet.create({
   faderFill: { position: 'absolute', bottom: 0, width: 3, backgroundColor: theme.good, borderRadius: 2 },
   faderHandle: { position: 'absolute', width: 26, height: 12, borderRadius: 6, backgroundColor: theme.text, borderWidth: 1, borderColor: theme.border },
   btn: { width: 40, height: 40, borderRadius: 8, backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border, alignItems: 'center', justifyContent: 'center', marginBottom: 6 },
+  btnActive: { backgroundColor: theme.accent, borderColor: theme.accent },
 });
 
 export default React.memo(RightRail);

@@ -10,7 +10,7 @@ const MODES = [{ m: 0, label: 'Loop' }, { m: 1, label: 'One shot' }, { m: 2, lab
 
 // On-screen sample editor (centered modal, like the tempo dial) — waveform with
 // draggable start/end trim, play mode, gain, fades, and tempo, in the app style.
-export default function SampleEditor({ visible, padId, name, bpm, waveform, edit, onChange, onSetBpm, onPreview, playing, onClose }) {
+export default function SampleEditor({ visible, padId, name, bpm, waveform, edit, onChange, onSetBpm, onPreview, onClose }) {
   const e = { ...DEFAULT_EDIT, ...(edit || {}) };
   const [w, setW] = useState(Math.min(880, Dimensions.get('window').width * 0.9));
   const waveW = w - 0; // waveform spans the panel
@@ -40,6 +40,7 @@ export default function SampleEditor({ visible, padId, name, bpm, waveform, edit
   const phx = phase >= 0 ? (e.startFrac + phase * (e.endFrac - e.startFrac)) * waveW : -1;
 
   const gainDb = linToDb(e.gain);
+  const isPlaying = phase >= 0;
 
   return (
     <Modal visible={visible} transparent animationType="fade" supportedOrientations={['landscape', 'landscape-left', 'landscape-right', 'portrait']} onRequestClose={onClose}>
@@ -47,8 +48,8 @@ export default function SampleEditor({ visible, padId, name, bpm, waveform, edit
         <Pressable style={[styles.card, { width: w }]} onPress={() => {}} onLayout={(ev) => setW(ev.nativeEvent.layout.width)}>
           {/* header */}
           <View style={styles.header}>
-            <Pressable style={[styles.play, playing && styles.playActive]} onPress={onPreview}>
-              {playing ? <Pause size={16} color="#0E0E12" /> : <Play size={16} color={theme.text} />}
+            <Pressable style={[styles.play, isPlaying && styles.playActive]} onPress={onPreview}>
+              {isPlaying ? <Pause size={16} color="#0E0E12" /> : <Play size={16} color={theme.text} />}
             </Pressable>
             <View style={styles.titleWrap}>
               <Text style={styles.title} numberOfLines={1}>{name || 'Sample'}</Text>
@@ -164,7 +165,6 @@ function buildWavePath(peaks, W, H) {
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const linToDb = (l) => (l > 0 ? 20 * Math.log10(l) : -60);
 const dbToLin = (db) => Math.pow(10, db / 20);
-const linToDbShort = (l) => linToDb(l);
 const half = (b) => Math.max(20, Math.round((b || 120) / 2 * 10) / 10);
 const dbl = (b) => Math.min(300, Math.round((b || 120) * 2 * 10) / 10);
 

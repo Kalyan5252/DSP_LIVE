@@ -21,6 +21,7 @@ import TempoDial from './src/components/TempoDial';
 import QuantizePicker from './src/components/QuantizePicker';
 import LibraryBrowser from './src/components/LibraryBrowser';
 import ProjectHome from './src/components/ProjectHome';
+import SampleEditor, { DEFAULT_EDIT } from './src/components/SampleEditor';
 
 const OLD_BOARD_KEY = 'livetrax.board.v1';
 const PROJECTS_KEY = 'livetrax.projects.v1';
@@ -79,7 +80,12 @@ export default function App() {
   const [libOpen, setLibOpen] = useState(false);
   const [libMode, setLibMode] = useState('manage');
   const [missing, setMissing] = useState({}); // library fileId -> true when file is gone
+  const [editMode, setEditMode] = useState(false);       // Edit (pencil) armed on the rail
+  const [editorPadId, setEditorPadId] = useState(null);  // pad open in the sample editor
+  const [waveform, setWaveform] = useState([]);
   const pickTargetRef = useRef(null);
+  const editModeRef = useRef(false); editModeRef.current = editMode;
+  const editorPadIdRef = useRef(null); editorPadIdRef.current = editorPadId;
 
   const padsRef = useRef({}); padsRef.current = pads;
   const volumeRef = useRef(1);
@@ -100,6 +106,47 @@ export default function App() {
     saveProjects(updateProject(projectsRef.current, id, patch));
   }, [saveProjects]);
   const persistPads = useCallback((nextPads) => { writeCurrent({ pads: nextPads }); }, [writeCurrent]);
+
+  // Push a pad's edit params into the engine (region/gain/fades/play mode).
+  const applyEdit = useCallback((id, ed) => {
+    engine.setRegion(id, ed.startFrac, ed.endFrac);
+    engine.setPadGain(id, ed.gain);
+    engine.setPadFades(id, ed.fadeInMs, ed.fadeOutMs);
+    engine.setPadPlayMode(id, ed.playMode);
+  }, []);
+
+  const openEditor = useCallback((id) => {
+    setWaveform(engine.getWaveform(id, 240));
+    setEditorPadId(id);
+  }, []);
+
+  const onEditorChange = useCallback((patch) => {
+    const id = editorPadIdRef.current; if (!id) return;
+    const p = padsRef.current[id]; if (!p) return;
+    const ed = { ...DEFAULT_EDIT, ...(p.edit || {}), ...patch };
+    applyEdit(id, ed);
+    setPads((prev) => { const pp = prev[id]; if (!pp) return prev; const next = { ...prev, [id]: { ...pp, edit: ed } }; persistPads(next); return next; });
+  }, [applyEdit, persistPads]);
+
+  const onEditorSetBpm = useCallback((v) => {
+    const id = editorPadIdRef.current; if (!id) return;
+    const nv = Math.max(20, Math.min(300, Math.round(v * 10) / 10));
+    engine.setPadBpm(id, nv);
+    setPads((prev) => { const pp = prev[id]; if (!pp) return prev; const next = { ...prev, [id]: { ...pp, bpm: nv } }; persistPads(next); return next; });
+  }, [persistPads]);
+
+  const onEditorPreview = useCallback(() => {
+    const id = editorPadIdRef.current; if (!id) return;
+    const st = syncStore.getPad(id);
+    if (st && st.s === 2) engine.stop(id);
+    else { engine.trigger(id); syncStore.markArmed(id); }
+  }, []);
+
+  const onCloseEditor = useCallback(() => {
+    const id = editorPadIdRef.current;
+    if (id) engine.stop(id);
+    setEditorPadId(null);
+  }, []);
 
   // Flag library files whose audio is missing on disk (e.g. lost in a prior
   // container reset) so the user can spot and re-import them.
@@ -205,6 +252,11 @@ export default function App() {
       const pd = padsCopy[pid];
       if (pd && pd.uri) {
         const dur = await engine.load(pid, resolveSampleUri(pd.uri), { bpm: pd.bpm || p.bpm, loop: true });
+        const ed = { ...DEFAULT_EDIT, ...(pd.edit || {}) };
+        engine.setRegion(pid, ed.startFrac, ed.endFrac);
+        engine.setPadGain(pid, ed.gain);
+        engine.setPadFades(pid, ed.fadeInMs, ed.fadeOutMs);
+        engine.setPadPlayMode(pid, ed.playMode);
         padsCopy[pid] = { ...pd, durationSec: dur };
       }
     }
@@ -304,6 +356,7 @@ export default function App() {
       setLibMode('pick'); setLibOpen(true);
       return;
     }
+    if (editModeRef.current) { openEditor(id); return; }
     const col = syncStore.getColumnActive()[inst.key];
     const activeRow = col ? col.row : null;
     if (activeRow === rowIndex) {
@@ -313,7 +366,7 @@ export default function App() {
       if (activeRow != null) engine.stop(padId(inst.key, activeRow));
       syncStore.markArmed(id);
     }
-  }, []);
+  }, [openEditor]);
 
   const onPadLong = useCallback((inst, rowIndex) => {
     const id = padId(inst.key, rowIndex);
@@ -372,13 +425,27 @@ export default function App() {
         <View style={styles.gridWrap}>
           <InstrumentGrid pads={pads} den={sig.den} onPadPress={onPadPress} onPadLong={onPadLong} />
         </View>
-        <RightRail onStopAll={onStopAll} onOpenLibrary={openLibraryManage} volume={volume} onVolume={onVolume} />
+        <RightRail onStopAll={onStopAll} onOpenLibrary={openLibraryManage} volume={volume} onVolume={onVolume} editActive={editMode} onToggleEdit={() => setEditMode((m) => !m)} />
       </View>
 
       <SignaturePicker visible={sigOpen} num={sig.num} den={sig.den} onClose={() => setSigOpen(false)} onSelect={(num, den) => { setSig({ num, den }); setSigOpen(false); }} />
       <TempoDial visible={tempoOpen} bpm={bpm} onClose={() => setTempoOpen(false)} onChange={(v) => setBpm(Math.max(20, Math.min(300, Math.round(v))))} />
       <QuantizePicker visible={qOpen} value={quantizeBeats} onClose={() => setQOpen(false)} onSelect={(b) => { setQuantizeBeats(b); setQOpen(false); }} />
       <LibraryBrowser visible={libOpen} library={library} missing={missing} mode={libMode} onClose={() => setLibOpen(false)} onChangeLibrary={onChangeLibrary} onPick={onPickFile} onImport={onImport} />
+      {editorPadId ? (
+        <SampleEditor
+          visible={!!editorPadId}
+          padId={editorPadId}
+          name={(pads[editorPadId] || {}).name}
+          bpm={(pads[editorPadId] || {}).bpm || bpm}
+          waveform={waveform}
+          edit={(pads[editorPadId] || {}).edit}
+          onChange={onEditorChange}
+          onSetBpm={onEditorSetBpm}
+          onPreview={onEditorPreview}
+          onClose={onCloseEditor}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }
