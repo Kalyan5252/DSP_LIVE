@@ -51,6 +51,16 @@ struct StretchVoice {
   ma_uint64 stopFrame = kNoStop; // frame the voice is scheduled to stop
   std::atomic<long long> pendingInPos{-1}; // phase-align: input pos to jump to on first read
 
+  // sample-edit params (trim region in INPUT frames, gain, fades, play mode)
+  ma_uint64 regionStart = 0;
+  ma_uint64 regionEnd = 0;              // 0 => use origFrames
+  std::atomic<float> gain{1.0f};        // linear
+  int fadeInFrames = 0, fadeOutFrames = 0;
+  int playMode = 0;                     // 0 loop | 1 one-shot | 2 gate
+
+  ma_uint64 regEnd() const { return regionEnd > regionStart ? regionEnd : origFrames; }
+  ma_uint64 regionLen() const { ma_uint64 e = regEnd(); return e > regionStart ? e - regionStart : 1; }
+
   void allocScratch() {
     int cap = kMaxBlock * (int)std::ceil(kMaxRatio) + 8;
     inCh.assign(channels, std::vector<float>(cap, 0.f));
@@ -60,7 +70,7 @@ struct StretchVoice {
     for (int c = 0; c < channels; ++c) { inPtr[c] = inCh[c].data(); outPtr[c] = outCh[c].data(); }
   }
 
-  void resetPlayback() { inPos = 0; ended = false; stretch.reset(); }
+  void resetPlayback() { inPos = regionStart; ended = false; stretch.reset(); }
 };
 
 // ---- custom ma_data_source callbacks (run on the audio thread) ----
@@ -79,19 +89,34 @@ static ma_result voice_read(ma_data_source* ds, void* pOut, ma_uint64 frameCount
 
   ma_uint64 done = 0;
   const double r = std::min(kMaxRatio, std::max(kMinRatio, v->ratio.load()));
+  const float gain = v->gain.load();
+  const ma_uint64 regStart = v->regionStart;
+  const ma_uint64 regEnd = v->regEnd();
+  const ma_uint64 regionLen = v->regionLen();
+  const int fIn = v->fadeInFrames;
+  const int fOut = v->fadeOutFrames;
+  const int mode = v->playMode;
+  if (v->inPos < regStart || v->inPos > regEnd) v->inPos = regStart;
 
   while (done < frameCount) {
     int block = (int)std::min<ma_uint64>(frameCount - done, kMaxBlock);
     int inNeed = std::max(1, (int)std::llround(block * r));
 
-    // gather inNeed input frames (looping / one-shot) into per-channel scratch
+    // gather inNeed input frames within the trim region, applying gain + fades.
     for (int i = 0; i < inNeed; ++i) {
-      if (v->inPos >= v->origFrames) {
-        if (v->loop) v->inPos = 0;
-        else { for (int c = 0; c < ch; ++c) v->inCh[c][i] = 0.f; continue; }
+      if (v->inPos >= regEnd) {
+        if (mode == 0) v->inPos = regStart;            // loop
+        else { for (int c = 0; c < ch; ++c) v->inCh[c][i] = 0.f; continue; } // one-shot/gate
+      }
+      float env = gain;
+      ma_uint64 pos = v->inPos - regStart;             // position within region
+      if (fIn > 0 && pos < (ma_uint64)fIn) env *= (float)pos / (float)fIn;
+      if (fOut > 0) {
+        ma_uint64 fromEnd = (regionLen > pos) ? (regionLen - 1 - pos) : 0;
+        if (fromEnd < (ma_uint64)fOut) env *= (float)fromEnd / (float)fOut;
       }
       const float* src = &v->orig[(size_t)v->inPos * ch];
-      for (int c = 0; c < ch; ++c) v->inCh[c][i] = src[c];
+      for (int c = 0; c < ch; ++c) v->inCh[c][i] = src[c] * env;
       v->inPos++;
     }
 
@@ -101,9 +126,9 @@ static ma_result voice_read(ma_data_source* ds, void* pOut, ma_uint64 frameCount
       for (int c = 0; c < ch; ++c) out[(size_t)(done + i) * ch + c] = v->outCh[c][i];
 
     done += block;
-
-    if (!v->loop && v->inPos >= v->origFrames) { /* keep draining tail this call */ }
   }
+
+  if (mode != 0 && v->inPos >= regEnd) v->ended = true; // one-shot/gate: stop after the tail
 
   v->playPos.store(v->inPos); // publish the true playhead for the UI
   if (pRead) *pRead = frameCount;
@@ -242,6 +267,10 @@ bool LiveTraxCore::loadPad(const std::string& id, const std::string& path, doubl
   v->baseBpm = bpm > 0 ? bpm : impl_->masterBpm;
   v->loop = loop;
   if (!impl_->decode(path, v.get())) return false;
+  v->regionStart = 0;
+  v->regionEnd = v->origFrames;
+  v->gain.store(1.0f);
+  v->playMode = loop ? 0 : 1;
   v->allocScratch();
   v->stretch.presetDefault(v->channels, (float)v->sampleRate);
   v->inLatency = v->stretch.inputLatency();
@@ -336,14 +365,15 @@ void LiveTraxCore::triggerSync(const std::string& id) {
   ma_uint64 startFrame = startAt;
   if (v->origFrames > 0) {
     double r = std::min(kMaxRatio, std::max(kMinRatio, impl_->ratioFor(v)));
-    double loopOut = r > 0 ? (double)v->origFrames / r : 0.0; // output frames per loop
+    ma_uint64 rl = v->regionLen();
+    double loopOut = r > 0 ? (double)rl / r : 0.0; // output frames per region loop
     if (loopOut > 0) {
       double elapsed = (double)(startAt - impl_->transportStart);
       double phaseOut = std::fmod(elapsed, loopOut);
       if (phaseOut < 0) phaseOut += loopOut;
       double phi = phaseOut / loopOut;
-      inStart = (ma_uint64)((double)v->origFrames * phi);
-      if (inStart >= v->origFrames) inStart = 0;
+      inStart = v->regionStart + (ma_uint64)((double)rl * phi);
+      if (inStart >= v->regEnd()) inStart = v->regionStart;
       startFrame = startAt - (ma_uint64)std::llround(phaseOut); // so display phase aligns
     }
   }
@@ -401,7 +431,7 @@ double LiveTraxCore::padDuration(const std::string& id) {
   if (it == impl_->pads.end()) return 0.0;
   StretchVoice* v = it->second.get();
   if (v->sampleRate <= 0) return 0.0;
-  return (double)v->origFrames / (double)v->sampleRate;
+  return (double)v->regionLen() / (double)v->sampleRate;
 }
 
 // Automatic tempo (BPM) detection for an imported file.
@@ -536,11 +566,11 @@ const char* LiveTraxCore::activePadsJSON() {
     // tempo. This is tempo-history-independent, so changing tempo in real time
     // moves the highlight continuously with the audio instead of jumping.
     double ph = 0.0;
-    if (state == 2 && v->origFrames > 0) {
-      long long of = (long long)v->origFrames;
-      long long heard = (long long)v->playPos.load() - (long long)v->inLatency; // what's audible now
-      heard %= of; if (heard < 0) heard += of;
-      ph = (double)heard / (double)of;
+    if (state == 2 && v->regionLen() > 0) {
+      long long rl = (long long)v->regionLen();
+      long long heard = (long long)v->playPos.load() - (long long)v->inLatency - (long long)v->regionStart;
+      heard %= rl; if (heard < 0) heard += rl;
+      ph = (double)heard / (double)rl;
     }
 
     if (!first) buf += ",";
@@ -554,6 +584,73 @@ const char* LiveTraxCore::activePadsJSON() {
     buf += "}";
   }
   buf += "}";
+  return buf.c_str();
+}
+
+// ---- sample-edit params ----
+void LiveTraxCore::setRegion(const std::string& id, double startFrac, double endFrac) {
+  auto it = impl_->pads.find(id);
+  if (it == impl_->pads.end()) return;
+  StretchVoice* v = it->second.get();
+  if (v->origFrames == 0) return;
+  double s = std::min(1.0, std::max(0.0, startFrac));
+  double e = std::min(1.0, std::max(0.0, endFrac));
+  ma_uint64 sf = (ma_uint64)(s * (double)v->origFrames);
+  ma_uint64 ef = (ma_uint64)(e * (double)v->origFrames);
+  if (ef <= sf) ef = sf + 1;
+  if (ef > v->origFrames) ef = v->origFrames;
+  v->regionStart = sf;
+  v->regionEnd = ef;
+}
+
+void LiveTraxCore::setPadGain(const std::string& id, double linear) {
+  auto it = impl_->pads.find(id);
+  if (it == impl_->pads.end()) return;
+  it->second->gain.store((float)(linear < 0 ? 0 : linear));
+}
+
+void LiveTraxCore::setPadFades(const std::string& id, double inMs, double outMs) {
+  auto it = impl_->pads.find(id);
+  if (it == impl_->pads.end()) return;
+  StretchVoice* v = it->second.get();
+  double sr = (double)v->sampleRate;
+  v->fadeInFrames = inMs > 0 ? (int)std::llround(inMs / 1000.0 * sr) : 0;
+  v->fadeOutFrames = outMs > 0 ? (int)std::llround(outMs / 1000.0 * sr) : 0;
+}
+
+void LiveTraxCore::setPadPlayMode(const std::string& id, int mode) {
+  auto it = impl_->pads.find(id);
+  if (it == impl_->pads.end()) return;
+  it->second->playMode = (mode < 0 || mode > 2) ? 0 : mode;
+  it->second->loop = (it->second->playMode == 0);
+}
+
+// Downsampled waveform peaks (0..1), CSV of `buckets` values over the whole file.
+const char* LiveTraxCore::waveform(const std::string& id, int buckets) {
+  std::string& buf = impl_->jsonBuf;
+  buf.clear();
+  auto it = impl_->pads.find(id);
+  if (it == impl_->pads.end()) return buf.c_str();
+  StretchVoice* v = it->second.get();
+  ma_uint64 total = v->origFrames;
+  int ch = v->channels;
+  if (total == 0) return buf.c_str();
+  int n = buckets < 8 ? 8 : (buckets > 4096 ? 4096 : buckets);
+  double per = (double)total / (double)n;
+  char tmp[24];
+  for (int b = 0; b < n; ++b) {
+    ma_uint64 s = (ma_uint64)((double)b * per);
+    ma_uint64 e = (ma_uint64)((double)(b + 1) * per);
+    if (e > total) e = total;
+    float peak = 0.f;
+    for (ma_uint64 f = s; f < e; ++f) {
+      const float* src = &v->orig[(size_t)f * ch];
+      for (int c = 0; c < ch; ++c) { float a = std::fabs(src[c]); if (a > peak) peak = a; }
+    }
+    if (peak > 1.f) peak = 1.f;
+    snprintf(tmp, sizeof(tmp), "%.3f,", peak);
+    buf += tmp;
+  }
   return buf.c_str();
 }
 
