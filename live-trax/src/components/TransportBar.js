@@ -1,14 +1,23 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { theme } from '../theme';
 import { Home, Play, Pause, Chevron, Metronome } from './Icons';
+import syncStore from '../audio/syncStore';
 
 // Top toolbar: home + project, transport (play, tempo, signature), and quantize.
+// The beat dot reads the native transport directly (via syncStore), so it stays
+// sample-accurate without re-rendering the rest of the app.
 export default function TransportBar({
-  bpm, num, den, playing, quantize, beat,
+  bpm, num, den, playing, quantize,
   onTogglePlay, onOpenTempo, onOpenSignature, onToggleQuantize,
 }) {
-  const beatOn = playing && beat;
+  const [beat, setBeat] = useState({ playing: false, beatInBar: 0 });
+  useEffect(() => {
+    setBeat(syncStore.getTransport());
+    return syncStore.subscribeTransport((t) => setBeat({ playing: t.playing, beatInBar: t.beatInBar }));
+  }, []);
+
+  const beatOn = (playing || beat.playing);
   const downbeat = beatOn && beat.beatInBar === 0;
 
   return (
