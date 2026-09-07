@@ -51,6 +51,18 @@ class SyncStore {
     if (subs) subs.forEach((f) => f(null));
   }
 
+  // Clear all pad state (e.g. when switching projects) so no stale highlight
+  // carries over. Notifies every subscriber that its pad is now idle.
+  reset() {
+    const ids = Object.keys(this.padState);
+    this.padState = {};
+    this.columnActive = {};
+    for (const id of ids) {
+      const subs = this.padSubs.get(id);
+      if (subs) subs.forEach((f) => f(null));
+    }
+  }
+
   _colOf(id) {
     const i = id.lastIndexOf('-');
     if (i <= 0) return null;
