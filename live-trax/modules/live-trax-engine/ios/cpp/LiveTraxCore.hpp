@@ -48,6 +48,13 @@ public:
   double transportInfo(int which);
   double padDuration(const std::string& id); // loop length in seconds (0 if none)
   double estimateBpm(const std::string& path);   // analyze a file, return detected BPM (0 if unknown)
+
+  // ---- sample-edit params ----
+  void setRegion(const std::string& id, double startFrac, double endFrac); // trim (0..1)
+  void setPadGain(const std::string& id, double linear);
+  void setPadFades(const std::string& id, double inMs, double outMs);
+  void setPadPlayMode(const std::string& id, int mode); // 0 loop | 1 one-shot | 2 gate
+  const char* waveform(const std::string& id, int buckets); // CSV peaks (0..1)
   // JSON of non-stopped pads: {"id":{"s":state,"p":phase}} state 1=armed 2=playing
   const char* activePadsJSON();
 

@@ -38,6 +38,11 @@ void ltx_setQuantize(double beats) { core().setQuantize(beats); }
 double ltx_transportInfo(int which) { return core().transportInfo(which); }
 double ltx_padDuration(const char* id) { return core().padDuration(id ? std::string(id) : std::string()); }
 double ltx_estimateBpm(const char* path) { return core().estimateBpm(path ? std::string(path) : std::string()); }
+void ltx_setRegion(const char* id, double s, double e) { core().setRegion(id ? std::string(id) : std::string(), s, e); }
+void ltx_setPadGain(const char* id, double g) { core().setPadGain(id ? std::string(id) : std::string(), g); }
+void ltx_setPadFades(const char* id, double inMs, double outMs) { core().setPadFades(id ? std::string(id) : std::string(), inMs, outMs); }
+void ltx_setPadPlayMode(const char* id, int mode) { core().setPadPlayMode(id ? std::string(id) : std::string(), mode); }
+const char* ltx_waveform(const char* id, int buckets) { return core().waveform(id ? std::string(id) : std::string(), buckets); }
 const char* ltx_activePadsJSON() { return core().activePadsJSON(); }
 
 }

@@ -22,6 +22,11 @@ import AVFAudio
 @_silgen_name("ltx_transportInfo") func ltx_transportInfo(_ which: Int32) -> Double
 @_silgen_name("ltx_padDuration") func ltx_padDuration(_ id: UnsafePointer<CChar>) -> Double
 @_silgen_name("ltx_estimateBpm") func ltx_estimateBpm(_ path: UnsafePointer<CChar>) -> Double
+@_silgen_name("ltx_setRegion") func ltx_setRegion(_ id: UnsafePointer<CChar>, _ s: Double, _ e: Double)
+@_silgen_name("ltx_setPadGain") func ltx_setPadGain(_ id: UnsafePointer<CChar>, _ g: Double)
+@_silgen_name("ltx_setPadFades") func ltx_setPadFades(_ id: UnsafePointer<CChar>, _ inMs: Double, _ outMs: Double)
+@_silgen_name("ltx_setPadPlayMode") func ltx_setPadPlayMode(_ id: UnsafePointer<CChar>, _ mode: Int32)
+@_silgen_name("ltx_waveform") func ltx_waveform(_ id: UnsafePointer<CChar>, _ buckets: Int32) -> UnsafePointer<CChar>?
 @_silgen_name("ltx_activePadsJSON") func ltx_activePadsJSON() -> UnsafePointer<CChar>?
 
 public class LiveTraxEngineModule: Module {
@@ -61,6 +66,15 @@ public class LiveTraxEngineModule: Module {
     Function("setQuantize") { (beats: Double) in ltx_setQuantize(beats) }
     Function("padDuration") { (padId: String) -> Double in padId.withCString { ltx_padDuration($0) } }
     Function("estimateBpm") { (path: String) -> Double in path.withCString { ltx_estimateBpm($0) } }
+    Function("setRegion") { (id: String, s: Double, e: Double) in id.withCString { ltx_setRegion($0, s, e) } }
+    Function("setPadGain") { (id: String, g: Double) in id.withCString { ltx_setPadGain($0, g) } }
+    Function("setPadFades") { (id: String, inMs: Double, outMs: Double) in id.withCString { ltx_setPadFades($0, inMs, outMs) } }
+    Function("setPadPlayMode") { (id: String, mode: Int) in id.withCString { ltx_setPadPlayMode($0, Int32(mode)) } }
+    Function("getWaveform") { (id: String, buckets: Int) -> String in
+      var out = ""
+      id.withCString { if let p = ltx_waveform($0, Int32(buckets)) { out = String(cString: p) } }
+      return out
+    }
 
     // Transport readout: [playing, barIndex, beatInBar, phase, beatsPerBar]
     Function("getTransport") { () -> [Double] in
