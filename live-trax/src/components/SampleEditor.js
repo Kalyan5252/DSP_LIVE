@@ -1,55 +1,71 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, View, Text, Pressable, StyleSheet, PanResponder, Dimensions } from 'react-native';
 import Svg, { Path, Rect, Line } from 'react-native-svg';
 import { theme } from '../theme';
 import { Play, Pause } from './Icons';
 import syncStore from '../audio/syncStore';
+import Slider from './Slider';
 
 export const DEFAULT_EDIT = { gain: 1, startFrac: 0, endFrac: 1, fadeInMs: 0, fadeOutMs: 0, playMode: 0 };
 const MODES = [{ m: 0, label: 'Loop' }, { m: 1, label: 'One shot' }, { m: 2, label: 'Gate' }];
+const H = 150;
 
-// On-screen sample editor (centered modal, like the tempo dial) — waveform with
-// draggable start/end trim, play mode, gain, fades, and tempo, in the app style.
+// On-screen sample editor (centered modal, like the tempo dial). Waveform with
+// draggable start/end trim, play mode, gain, fades, and tempo. The waveform path
+// is memoized and the playhead is isolated, so dragging the sliders stays smooth
+// while audio plays.
 export default function SampleEditor({ visible, padId, name, bpm, waveform, edit, onChange, onSetBpm, onPreview, onClose }) {
   const e = { ...DEFAULT_EDIT, ...(edit || {}) };
   const [w, setW] = useState(Math.min(880, Dimensions.get('window').width * 0.9));
-  const waveW = w - 0; // waveform spans the panel
+  const waveW = w;
 
-  // live playhead (0..1 through the region) for this pad while previewing
-  const [phase, setPhase] = useState(-1);
+  // Local trim region for smooth dragging; syncs from props when not dragging.
+  const [region, setRegion] = useState({ startFrac: e.startFrac, endFrac: e.endFrac });
+  const draggingTrim = useRef(false);
+  const regionRef = useRef(region); regionRef.current = region;
+  useEffect(() => {
+    if (!draggingTrim.current) setRegion({ startFrac: e.startFrac, endFrac: e.endFrac });
+  }, [e.startFrac, e.endFrac]);
+  const lastRegionApply = useRef(0);
+  const applyRegion = (r, commit) => {
+    setRegion(r);
+    const now = Date.now();
+    if (commit || now - lastRegionApply.current > 40) { lastRegionApply.current = now; onChange && onChange(r); }
+  };
+
+  // Minimal "playing" state (flips on start/stop only — not per frame).
+  const [playing, setPlaying] = useState(false);
   useEffect(() => {
     if (!visible) return undefined;
-    const apply = (v) => setPhase(v && v.s === 2 ? (v.ph || 0) : -1);
+    const apply = (v) => setPlaying(!!(v && v.s === 2));
     apply(syncStore.getPad(padId));
     return syncStore.subscribePad(padId, apply);
   }, [visible, padId]);
 
-  const patch = (p) => onChange && onChange(p);
+  const wavePath = useMemo(() => (waveform && waveform.length ? buildWavePath(waveform, waveW, H) : ''), [waveform, waveW]);
 
-  // ---- trim handle drag ----
-  const startPan = useRef(makeHandlePan(() => e.startFrac, (f) => patch({ startFrac: clamp(f, 0, e.endFrac - 0.02) }), () => waveW)).current;
-  const endPan = useRef(makeHandlePan(() => e.endFrac, (f) => patch({ endFrac: clamp(f, e.startFrac + 0.02, 1) }), () => waveW)).current;
-  // keep the pan refs reading latest values
-  startPan.get = () => e.startFrac; startPan.set = (f) => patch({ startFrac: clamp(f, 0, e.endFrac - 0.02) }); startPan.width = () => waveW;
-  endPan.get = () => e.endFrac; endPan.set = (f) => patch({ endFrac: clamp(f, e.startFrac + 0.02, 1) }); endPan.width = () => waveW;
-
-  const H = 150;
-  const path = waveform && waveform.length ? buildWavePath(waveform, waveW, H) : '';
-  const sx = e.startFrac * waveW;
-  const ex = e.endFrac * waveW;
-  const phx = phase >= 0 ? (e.startFrac + phase * (e.endFrac - e.startFrac)) * waveW : -1;
-
+  const sx = region.startFrac * waveW;
+  const ex = region.endFrac * waveW;
   const gainDb = linToDb(e.gain);
-  const isPlaying = phase >= 0;
+
+  const startPan = useRef(null);
+  const endPan = useRef(null);
+  if (!startPan.current) startPan.current = makeHandlePan(
+    () => regionRef.current.startFrac, () => waveW, draggingTrim,
+    (f, commit) => applyRegion({ startFrac: clamp(f, 0, regionRef.current.endFrac - 0.02), endFrac: regionRef.current.endFrac }, commit),
+  );
+  if (!endPan.current) endPan.current = makeHandlePan(
+    () => regionRef.current.endFrac, () => waveW, draggingTrim,
+    (f, commit) => applyRegion({ startFrac: regionRef.current.startFrac, endFrac: clamp(f, regionRef.current.startFrac + 0.02, 1) }, commit),
+  );
 
   return (
     <Modal visible={visible} transparent animationType="fade" supportedOrientations={['landscape', 'landscape-left', 'landscape-right', 'portrait']} onRequestClose={onClose}>
       <Pressable style={styles.backdrop} onPress={onClose}>
         <Pressable style={[styles.card, { width: w }]} onPress={() => {}} onLayout={(ev) => setW(ev.nativeEvent.layout.width)}>
-          {/* header */}
           <View style={styles.header}>
-            <Pressable style={[styles.play, isPlaying && styles.playActive]} onPress={onPreview}>
-              {isPlaying ? <Pause size={16} color="#0E0E12" /> : <Play size={16} color={theme.text} />}
+            <Pressable style={[styles.play, playing && styles.playActive]} onPress={onPreview}>
+              {playing ? <Pause size={16} color="#0E0E12" /> : <Play size={16} color={theme.text} />}
             </Pressable>
             <View style={styles.titleWrap}>
               <Text style={styles.title} numberOfLines={1}>{name || 'Sample'}</Text>
@@ -58,42 +74,37 @@ export default function SampleEditor({ visible, padId, name, bpm, waveform, edit
             <Pressable style={styles.close} onPress={onClose}><Text style={styles.closeTxt}>✕</Text></Pressable>
           </View>
 
-          {/* waveform + trim */}
           <View style={styles.wave}>
             <Svg width={waveW} height={H}>
-              <Rect x={0} y={0} width={sx} height={H} fill="rgba(0,0,0,0.55)" />
-              <Rect x={ex} y={0} width={Math.max(0, waveW - ex)} height={H} fill="rgba(0,0,0,0.55)" />
-              {path ? <Path d={path} fill={theme.danger} opacity={0.9} /> : null}
+              {wavePath ? <Path d={wavePath} fill={theme.danger} opacity={0.9} /> : null}
+              <Rect x={0} y={0} width={sx} height={H} fill="rgba(8,6,7,0.66)" />
+              <Rect x={ex} y={0} width={Math.max(0, waveW - ex)} height={H} fill="rgba(8,6,7,0.66)" />
               <Line x1={sx} y1={0} x2={sx} y2={H} stroke="#fff" strokeWidth={2} />
               <Line x1={ex} y1={0} x2={ex} y2={H} stroke="#fff" strokeWidth={2} />
-              {phx >= 0 ? <Line x1={phx} y1={0} x2={phx} y2={H} stroke={theme.good} strokeWidth={2} /> : null}
             </Svg>
-            {/* drag zones over the handles */}
-            <View style={[styles.handle, { left: sx - 16 }]} {...startPan.panHandlers} />
-            <View style={[styles.handle, { left: ex - 16 }]} {...endPan.panHandlers} />
+            <Playhead padId={padId} startFrac={region.startFrac} endFrac={region.endFrac} width={waveW} height={H} />
+            <View style={[styles.handle, { left: sx - 16 }]} {...startPan.current.panHandlers} />
+            <View style={[styles.handle, { left: ex - 16 }]} {...endPan.current.panHandlers} />
           </View>
 
-          {/* play mode */}
           <View style={styles.modes}>
             {MODES.map((o) => (
-              <Pressable key={o.m} onPress={() => patch({ playMode: o.m })} style={[styles.mode, e.playMode === o.m && styles.modeActive]}>
+              <Pressable key={o.m} onPress={() => onChange({ playMode: o.m })} style={[styles.mode, e.playMode === o.m && styles.modeActive]}>
                 <Text style={[styles.modeTxt, e.playMode === o.m && { color: theme.danger }]}>{o.label}</Text>
               </Pressable>
             ))}
           </View>
 
-          {/* sliders */}
-          <EditSlider label="Gain" value={gainDb} min={-24} max={12} unit="dB" fmt={(v) => `${v > 0 ? '+' : ''}${v.toFixed(1)}`} onChange={(db) => patch({ gain: dbToLin(db) })} />
+          <Slider label="Gain" value={gainDb} min={-24} max={12} unit="dB" format={(v) => `${v > 0 ? '+' : ''}${v.toFixed(1)}`} onChange={(db) => onChange({ gain: dbToLin(db) })} />
           <View style={styles.row2}>
             <View style={styles.half}>
-              <EditSlider label="Fade in" value={e.fadeInMs} min={0} max={2000} unit="ms" fmt={(v) => `${Math.round(v)}`} onChange={(ms) => patch({ fadeInMs: Math.round(ms) })} />
+              <Slider label="Fade in" value={e.fadeInMs} min={0} max={2000} unit="ms" format={(v) => `${Math.round(v)}`} onChange={(ms) => onChange({ fadeInMs: Math.round(ms) })} />
             </View>
             <View style={styles.half}>
-              <EditSlider label="Fade out" value={e.fadeOutMs} min={0} max={2000} unit="ms" fmt={(v) => `${Math.round(v)}`} onChange={(ms) => patch({ fadeOutMs: Math.round(ms) })} />
+              <Slider label="Fade out" value={e.fadeOutMs} min={0} max={2000} unit="ms" format={(v) => `${Math.round(v)}`} onChange={(ms) => onChange({ fadeOutMs: Math.round(ms) })} />
             </View>
           </View>
 
-          {/* tempo */}
           <View style={styles.tempoRow}>
             <Text style={styles.tLabel}>Tempo</Text>
             <Pressable style={styles.tBtn} onPress={() => onSetBpm(half(bpm))}><Text style={styles.tBtnTxt}>÷2</Text></Pressable>
@@ -108,57 +119,42 @@ export default function SampleEditor({ visible, padId, name, bpm, waveform, edit
   );
 }
 
-// A labeled horizontal slider (0..1 mapped to [min,max]).
-function EditSlider({ label, value, min, max, unit, fmt, onChange }) {
-  const [w, setW] = useState(240);
-  const wRef = useRef(w); wRef.current = w;
-  const set = (x) => { const f = clamp(x / Math.max(1, wRef.current), 0, 1); onChange(min + f * (max - min)); };
-  const pan = useRef(PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponder: () => true,
-    onPanResponderGrant: (ev) => set(ev.nativeEvent.locationX),
-    onPanResponderMove: (ev) => set(ev.nativeEvent.locationX),
-  })).current;
-  const pct = clamp((value - min) / (max - min), 0, 1);
-  return (
-    <View style={styles.sliderWrap}>
-      <View style={styles.sliderHead}>
-        <Text style={styles.sliderLabel}>{label}</Text>
-        <Text style={styles.sliderVal}>{fmt(value)} {unit}</Text>
-      </View>
-      <View style={styles.track} onLayout={(e) => setW(e.nativeEvent.layout.width)} {...pan.panHandlers}>
-        <View style={styles.trackBg} />
-        <View style={[styles.trackFill, { width: `${pct * 100}%` }]} />
-        <View style={[styles.thumb, { left: `${pct * 100}%` }]} />
-      </View>
-    </View>
-  );
+// Isolated playhead: subscribes to the pad's phase and re-renders ONLY itself.
+function Playhead({ padId, startFrac, endFrac, width, height }) {
+  const [x, setX] = useState(-1);
+  useEffect(() => {
+    const apply = (v) => {
+      if (v && v.s === 2) setX((startFrac + (v.ph || 0) * (endFrac - startFrac)) * width);
+      else setX(-1);
+    };
+    apply(syncStore.getPad(padId));
+    return syncStore.subscribePad(padId, apply);
+  }, [padId, startFrac, endFrac, width]);
+  if (x < 0) return null;
+  return <View pointerEvents="none" style={{ position: 'absolute', top: 0, height, left: x, width: 2, backgroundColor: theme.good }} />;
 }
 
-function makeHandlePan(get, set, width) {
-  const obj = { get, set, width };
+function makeHandlePan(get, width, draggingRef, set) {
+  const obj = {};
   obj.panHandlers = PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
-    onPanResponderMove: (ev, g) => {
-      const wpx = obj.width();
-      if (!wpx) return;
-      const f = obj.get() + g.dx / wpx;
-      obj.set(f);
-    },
-    onPanResponderGrant: () => {},
+    onPanResponderGrant: () => { draggingRef.current = true; },
+    onPanResponderMove: (ev, g) => { const wpx = width(); if (wpx) set(get() + g.dx / wpx, false); },
+    onPanResponderRelease: (ev, g) => { const wpx = width(); if (wpx) set(get() + g.dx / wpx, true); draggingRef.current = false; },
+    onPanResponderTerminate: () => { draggingRef.current = false; },
   }).panHandlers;
   return obj;
 }
 
-function buildWavePath(peaks, W, H) {
+function buildWavePath(peaks, W, H2) {
   const n = peaks.length;
-  const mid = H / 2;
+  const mid = H2 / 2;
   const step = W / n;
   let top = `M 0 ${mid}`;
-  for (let i = 0; i < n; i++) { const x = i * step; const y = mid - peaks[i] * (H / 2) * 0.95; top += ` L ${x.toFixed(1)} ${y.toFixed(1)}`; }
+  for (let i = 0; i < n; i++) { const x = i * step; const y = mid - peaks[i] * (H2 / 2) * 0.95; top += ` L ${x.toFixed(1)} ${y.toFixed(1)}`; }
   let bot = '';
-  for (let i = n - 1; i >= 0; i--) { const x = i * step; const y = mid + peaks[i] * (H / 2) * 0.95; bot += ` L ${x.toFixed(1)} ${y.toFixed(1)}`; }
+  for (let i = n - 1; i >= 0; i--) { const x = i * step; const y = mid + peaks[i] * (H2 / 2) * 0.95; bot += ` L ${x.toFixed(1)} ${y.toFixed(1)}`; }
   return `${top}${bot} Z`;
 }
 
@@ -190,15 +186,6 @@ const styles = StyleSheet.create({
 
   row2: { flexDirection: 'row', gap: 14 },
   half: { flex: 1 },
-
-  sliderWrap: { marginBottom: 12 },
-  sliderHead: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
-  sliderLabel: { color: theme.text, fontSize: 13, fontWeight: '700' },
-  sliderVal: { color: theme.danger, fontSize: 13, fontWeight: '800', fontVariant: ['tabular-nums'] },
-  track: { height: 30, justifyContent: 'center' },
-  trackBg: { position: 'absolute', left: 0, right: 0, height: 4, borderRadius: 2, backgroundColor: theme.surfaceActive },
-  trackFill: { position: 'absolute', left: 0, height: 4, borderRadius: 2, backgroundColor: theme.good },
-  thumb: { position: 'absolute', width: 18, height: 18, borderRadius: 9, marginLeft: -9, backgroundColor: theme.text, borderWidth: 1, borderColor: theme.border },
 
   tempoRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
   tLabel: { color: theme.text, fontSize: 13, fontWeight: '700', marginRight: 'auto' },

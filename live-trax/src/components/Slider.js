@@ -1,0 +1,96 @@
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, Animated, PanResponder, StyleSheet } from 'react-native';
+import { theme } from '../theme';
+
+// A smooth slider whose HANDLE is driven by an Animated.Value (updated with
+// setValue on each move) instead of React state — so dragging it never triggers
+// a re-render and stays smooth even while audio is playing and the JS thread is
+// busy. The audio value is applied throttled; the numeric label updates at a low
+// rate. Supports horizontal and vertical (bottom-up) orientation.
+export default function Slider({
+  label, value, min = 0, max = 1, unit = '', format,
+  onChange, vertical = false, style, trackStyle, pad = 0,
+}) {
+  const [size, setSize] = useState(vertical ? 160 : 240);
+  const sizeRef = useRef(size); sizeRef.current = size;
+  const frac = clamp((value - min) / (max - min), 0, 1);
+  const av = useRef(new Animated.Value(frac)).current;
+  const dragging = useRef(false);
+  const [labelVal, setLabelVal] = useState(value);
+  const lastApply = useRef(0);
+  const lastLabel = useRef(0);
+
+  // Follow external value changes only when the user isn't dragging.
+  useEffect(() => {
+    if (!dragging.current) { av.setValue(frac); setLabelVal(value); }
+  }, [value, frac, av]);
+
+  const fracFromEvent = (e) => {
+    const inner = Math.max(1, sizeRef.current - pad * 2);
+    if (vertical) return clamp(1 - (e.nativeEvent.locationY - pad) / inner, 0, 1);
+    return clamp((e.nativeEvent.locationX - pad) / inner, 0, 1);
+  };
+  const emit = (f, commit) => {
+    const val = min + f * (max - min);
+    const now = Date.now();
+    if (commit || now - lastApply.current > 40) { lastApply.current = now; onChange && onChange(val); }
+    if (commit || now - lastLabel.current > 90) { lastLabel.current = now; setLabelVal(val); }
+  };
+
+  const pan = useRef(PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => true,
+    onPanResponderGrant: (e) => { dragging.current = true; const f = fracFromEvent(e); av.setValue(f); emit(f, false); },
+    onPanResponderMove: (e) => { const f = fracFromEvent(e); av.setValue(f); emit(f, false); },
+    onPanResponderRelease: (e) => { const f = fracFromEvent(e); av.setValue(f); dragging.current = false; emit(f, true); },
+    onPanResponderTerminate: (e) => { const f = fracFromEvent(e); av.setValue(f); dragging.current = false; emit(f, true); },
+  })).current;
+
+  const pctStr = av.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
+
+  if (vertical) {
+    return (
+      <View style={[styles.vWrap, style]} onLayout={(e) => setSize(e.nativeEvent.layout.height)} {...pan.panHandlers}>
+        <View style={[styles.vInner, { paddingVertical: pad }]}>
+          <View style={styles.vTrackBg} />
+          <Animated.View style={[styles.vFill, { height: pctStr }]} />
+          <Animated.View style={[styles.vThumb, { bottom: pctStr }]} />
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={style}>
+      {label != null ? (
+        <View style={styles.head}>
+          <Text style={styles.label}>{label}</Text>
+          <Text style={styles.val}>{format ? format(labelVal) : Math.round(labelVal)}{unit ? ` ${unit}` : ''}</Text>
+        </View>
+      ) : null}
+      <View style={[styles.track, trackStyle]} onLayout={(e) => setSize(e.nativeEvent.layout.width)} {...pan.panHandlers}>
+        <View style={styles.bg} />
+        <Animated.View style={[styles.fill, { width: pctStr }]} />
+        <Animated.View style={[styles.thumb, { left: pctStr }]} />
+      </View>
+    </View>
+  );
+}
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+const styles = StyleSheet.create({
+  head: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
+  label: { color: theme.text, fontSize: 13, fontWeight: '700' },
+  val: { color: theme.danger, fontSize: 13, fontWeight: '800', fontVariant: ['tabular-nums'] },
+  track: { height: 30, justifyContent: 'center' },
+  bg: { position: 'absolute', left: 0, right: 0, height: 4, borderRadius: 2, backgroundColor: theme.surfaceActive },
+  fill: { position: 'absolute', left: 0, height: 4, borderRadius: 2, backgroundColor: theme.good },
+  thumb: { position: 'absolute', width: 18, height: 18, borderRadius: 9, marginLeft: -9, backgroundColor: theme.text, borderWidth: 1, borderColor: theme.border },
+
+  vWrap: { width: 40, flex: 1, minHeight: 70, alignItems: 'center' },
+  vInner: { flex: 1, width: 26, alignItems: 'center', justifyContent: 'flex-end' },
+  vTrackBg: { position: 'absolute', top: 0, bottom: 0, width: 3, borderRadius: 2, backgroundColor: theme.surfaceActive },
+  vFill: { position: 'absolute', bottom: 0, width: 3, backgroundColor: theme.good, borderRadius: 2 },
+  vThumb: { position: 'absolute', width: 26, height: 12, borderRadius: 6, marginBottom: -6, backgroundColor: theme.text, borderWidth: 1, borderColor: theme.border },
+});
