@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Modal, View, Text, Pressable, TextInput, ScrollView, StyleSheet, Animated, Dimensions, SafeAreaView, Keyboard, InputAccessoryView, Platform } from 'react-native';
+import { View, Text, Pressable, TextInput, ScrollView, StyleSheet, Animated, Dimensions, SafeAreaView, Keyboard, InputAccessoryView, Platform } from 'react-native';
 
 const KB_ACCESSORY = 'lt-kb-done';
 import { theme } from '../theme';
@@ -14,26 +14,42 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
   const [folderId, setFolderId] = useState(null);
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState({ name: '', color: LIB_COLORS[0], tags: '', bpm: '' });
+  // `show` keeps the drawer in the tree while it animates OUT after visible=false.
+  const [show, setShow] = useState(false);
 
   const panelW = Math.max(320, Math.min(560, Dimensions.get('window').width * 0.55));
-  const tx = useRef(new Animated.Value(panelW)).current;   // panel slide
+  const tx = useRef(new Animated.Value(panelW)).current;   // panel slide (starts off-screen)
   const bd = useRef(new Animated.Value(0)).current;        // backdrop fade (0..1)
+  const showRef = useRef(false);
+
   useEffect(() => {
     if (visible) {
+      // Mount, reset to a fresh view, and PARK off-screen synchronously so the
+      // very first painted frame is off-screen; then slide in on the next frame.
       setFolderId(null); setEditing(null);
-      // tx is parked off-screen (reset on close / init), so the first paint is
-      // off-screen; then the dark backdrop fades in as the panel slides in.
-      Animated.parallel([
-        Animated.timing(tx, { toValue: 0, duration: 240, useNativeDriver: true }),
-        Animated.timing(bd, { toValue: 1, duration: 240, useNativeDriver: true }),
-      ]).start();
-    } else {
-      // Park off-screen the moment it closes, so the NEXT open never flashes
-      // on-screen for a frame before the slide-in starts.
-      tx.setValue(panelW);
-      bd.setValue(0);
+      tx.setValue(panelW); bd.setValue(0);
+      showRef.current = true; setShow(true);
+      const raf = requestAnimationFrame(() => {
+        Animated.parallel([
+          Animated.timing(tx, { toValue: 0, duration: 240, useNativeDriver: true }),
+          Animated.timing(bd, { toValue: 1, duration: 240, useNativeDriver: true }),
+        ]).start();
+      });
+      return () => cancelAnimationFrame(raf);
     }
+    // visible=false: slide out, then unmount.
+    if (showRef.current) {
+      Animated.parallel([
+        Animated.timing(tx, { toValue: panelW, duration: 200, useNativeDriver: true }),
+        Animated.timing(bd, { toValue: 0, duration: 200, useNativeDriver: true }),
+      ]).start(({ finished }) => {
+        if (finished) { showRef.current = false; setShow(false); }
+      });
+    }
+    return undefined;
   }, [visible, panelW, tx, bd]);
+
+  if (!show) return null;
 
   const { folders, files } = childrenOf(library, folderId);
   const crumbs = pathTo(library, folderId);
@@ -67,13 +83,7 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
   };
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="none"
-      supportedOrientations={['landscape', 'landscape-left', 'landscape-right', 'portrait']}
-      onRequestClose={onClose}
-    >
+    <View style={styles.overlay} pointerEvents="box-none">
       <View style={styles.root}>
         <Animated.View style={[styles.backdrop, { opacity: bd }]}>
           <Pressable style={styles.backdropPress} onPress={onClose} />
@@ -170,11 +180,12 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
           </InputAccessoryView>
         ) : null}
       </View>
-    </Modal>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  overlay: { ...StyleSheet.absoluteFillObject, zIndex: 100, elevation: 100 },
   root: { flex: 1 },
   backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)' },
   backdropPress: { flex: 1 },
