@@ -165,8 +165,33 @@ static ma_data_source_vtable g_vtable = {
 
 // ---------------------------------------------------------------------------
 
+// Master soft limiter: transparent below the threshold, gently saturates above,
+// so the summed mix of many simultaneous loops can never hard-clip (the harsh
+// digital noise). Stateless and cheap — runs on the audio thread.
+static inline float ltx_softlimit(float x) {
+  const float t = 0.8f;
+  float ax = x < 0.f ? -x : x;
+  if (ax <= t) return x;
+  float over = ax - t;
+  float comp = t + (1.0f - t) * std::tanh(over / (1.0f - t));
+  return x < 0.f ? -comp : comp;
+}
+
+// Device callback: pull the mixed engine output, then limit it.
+static void ltx_data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+  (void)pInput;
+  ma_engine* engine = (ma_engine*)pDevice->pUserData;
+  ma_uint64 read = 0;
+  ma_engine_read_pcm_frames(engine, pOutput, frameCount, &read);
+  float* out = (float*)pOutput;
+  ma_uint32 n = frameCount * pDevice->playback.channels;
+  for (ma_uint32 i = 0; i < n; ++i) out[i] = ltx_softlimit(out[i]);
+}
+
 struct LiveTraxCore::Impl {
   ma_engine engine{};
+  ma_device device{};
+  bool deviceReady = false;
   bool ready = false;
   float masterVolume = 1.0f;
   double masterBpm = 120.0;
@@ -248,13 +273,36 @@ LiveTraxCore::~LiveTraxCore() { shutdown(); delete impl_; }
 
 bool LiveTraxCore::init() {
   if (impl_->ready) return true;
-  if (ma_engine_init(nullptr, &impl_->engine) != MA_SUCCESS) return false;
+
+  ma_device_config dcfg = ma_device_config_init(ma_device_type_playback);
+  dcfg.playback.format = ma_format_f32;
+  dcfg.playback.channels = 2;
+  dcfg.sampleRate = 0; // device default
+  dcfg.dataCallback = ltx_data_callback;
+  dcfg.pUserData = &impl_->engine;
+  if (ma_device_init(NULL, &dcfg, &impl_->device) != MA_SUCCESS) return false;
+  impl_->deviceReady = true;
+
+  ma_engine_config ecfg = ma_engine_config_init();
+  ecfg.noDevice = MA_TRUE;
+  ecfg.channels = impl_->device.playback.channels;
+  ecfg.sampleRate = impl_->device.sampleRate;
+  if (ma_engine_init(&ecfg, &impl_->engine) != MA_SUCCESS) {
+    ma_device_uninit(&impl_->device); impl_->deviceReady = false;
+    return false;
+  }
+  if (ma_device_start(&impl_->device) != MA_SUCCESS) {
+    ma_engine_uninit(&impl_->engine);
+    ma_device_uninit(&impl_->device); impl_->deviceReady = false;
+    return false;
+  }
   impl_->ready = true;
   return true;
 }
 
 void LiveTraxCore::shutdown() {
   if (!impl_->ready) return;
+  if (impl_->deviceReady) { ma_device_uninit(&impl_->device); impl_->deviceReady = false; }
   for (auto& kv : impl_->pads) impl_->destroy(kv.second.get());
   impl_->pads.clear();
   ma_engine_uninit(&impl_->engine);
