@@ -31,7 +31,7 @@ class AudioEngine {
     this.masterBpm = 120;
     this.sigNum = 4;
     this.sigDen = 4;
-    this.quantizeMode = 'bar';            // 'bar' | 'off'
+    this.quantizeBeats = 4;               // launch/transition quantum in beats (0 = off)
     this.loadedIds = new Set();
     this.durations = new Map(); // padId -> loop length (seconds)
     this.listener = null;
@@ -61,20 +61,14 @@ class AudioEngine {
     if (den > 0) this.sigDen = den;
     this.transport.configure({ num, den });
     try { Native.setMasterSignature(this.sigNum, this.sigDen); } catch (e) { /* not built */ }
-    this._pushQuantize(); // 'bar' quantum depends on the signature
   }
 
   applyTempo() { try { Native.applyTempo(); } catch (e) {} }
 
-  // quantize is a UI mode ('bar' | 'off'); the native quantum is in beats.
-  setQuantize(q) {
-    this.quantizeMode = q;
-    this.transport.setQuantize(q);
-    this._pushQuantize();
-  }
-  _pushQuantize() {
-    const beats = this.quantizeMode === 'bar' ? this.sigNum : 0;
-    try { Native.setQuantize(beats); } catch (e) { /* not built */ }
+  // Launch/transition quantum in BEATS of the master clock (0 = off/instant).
+  setQuantize(beats) {
+    this.quantizeBeats = beats > 0 ? beats : 0;
+    try { Native.setQuantize(this.quantizeBeats); } catch (e) { /* not built */ }
   }
 
   // ---- clock ----

@@ -5,7 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
 
 import { theme } from './src/theme';
-import { padId } from './src/config';
+import { padId, quantizeLabel } from './src/config';
 import engine from './src/audio/engine';
 import syncStore from './src/audio/syncStore';
 import { importSampleFile, deleteSampleFile } from './src/storage/store';
@@ -15,6 +15,7 @@ import InstrumentGrid from './src/components/InstrumentGrid';
 import RightRail from './src/components/RightRail';
 import SignaturePicker from './src/components/SignaturePicker';
 import TempoDial from './src/components/TempoDial';
+import QuantizePicker from './src/components/QuantizePicker';
 import LibraryBrowser from './src/components/LibraryBrowser';
 
 const STORE_KEY = 'livetrax.board.v1';
@@ -24,7 +25,8 @@ export default function App() {
   const [pads, setPads] = useState({});
   const [bpm, setBpm] = useState(120);
   const [sig, setSig] = useState({ num: 4, den: 4 });
-  const [quantize, setQuantize] = useState('bar');
+  const [quantizeBeats, setQuantizeBeats] = useState(4); // master-beats per transition
+  const [qOpen, setQOpen] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(1);
   const [sigOpen, setSigOpen] = useState(false);
@@ -52,7 +54,8 @@ export default function App() {
           if (saved.sig) { setSig(saved.sig); engine.setMasterSignature(saved.sig.num, saved.sig.den); }
           if (typeof saved.volume === 'number') { setVolume(saved.volume); volumeRef.current = saved.volume; }
           engine.setMasterVolume(volumeRef.current);
-          engine.setQuantize('bar');
+          engine.setQuantize(typeof saved.quantizeBeats === 'number' ? saved.quantizeBeats : 4);
+          if (typeof saved.quantizeBeats === 'number') setQuantizeBeats(saved.quantizeBeats);
           if (saved.pads) {
             setPads(saved.pads);
             for (const id of Object.keys(saved.pads)) {
@@ -66,7 +69,7 @@ export default function App() {
           }
         } else {
           engine.setMasterSignature(4, 4);
-          engine.setQuantize('bar');
+          engine.setQuantize(4);
         }
         const rawLib = await AsyncStorage.getItem(LIB_KEY);
         if (rawLib && mounted) {
@@ -92,16 +95,16 @@ export default function App() {
   useEffect(() => {
     engine.setMasterSignature(sig.num, sig.den);
   }, [sig]);
-  useEffect(() => { engine.setQuantize(quantize); }, [quantize]);
+  useEffect(() => { engine.setQuantize(quantizeBeats); }, [quantizeBeats]);
 
   // Debounced persistence of settings (tempo/signature/volume).
   useEffect(() => {
     const t = setTimeout(() => {
       engine.setMasterVolume(volume);
-      AsyncStorage.setItem(STORE_KEY, JSON.stringify({ pads: padsRef.current, bpm, sig, volume })).catch(() => {});
+      AsyncStorage.setItem(STORE_KEY, JSON.stringify({ pads: padsRef.current, bpm, sig, volume, quantizeBeats })).catch(() => {});
     }, 500);
     return () => clearTimeout(t);
-  }, [bpm, sig, volume]);
+  }, [bpm, sig, volume, quantizeBeats]);
 
   const persist = useCallback((nextPads) => {
     AsyncStorage.setItem(STORE_KEY, JSON.stringify({ pads: nextPads, bpm, sig, volume: volumeRef.current })).catch(() => {});
@@ -223,11 +226,11 @@ export default function App() {
       <StatusBar style="light" hidden />
       <TransportBar
         bpm={bpm} num={sig.num} den={sig.den}
-        playing={isPlaying} quantize={quantize}
+        playing={isPlaying} quantizeLabel={quantizeLabel(quantizeBeats)} quantizeActive={quantizeBeats > 0}
         onTogglePlay={onTogglePlay}
         onOpenTempo={() => setTempoOpen(true)}
         onOpenSignature={() => setSigOpen(true)}
-        onToggleQuantize={() => setQuantize((q) => (q === 'bar' ? 'off' : 'bar'))}
+        onOpenQuantize={() => setQOpen(true)}
       />
 
       <View style={styles.body}>
@@ -239,6 +242,7 @@ export default function App() {
 
       <SignaturePicker visible={sigOpen} num={sig.num} den={sig.den} onClose={() => setSigOpen(false)} onSelect={(num, den) => { setSig({ num, den }); setSigOpen(false); }} />
       <TempoDial visible={tempoOpen} bpm={bpm} onClose={() => setTempoOpen(false)} onChange={(v) => setBpm(Math.max(20, Math.min(300, Math.round(v))))} />
+      <QuantizePicker visible={qOpen} value={quantizeBeats} onClose={() => setQOpen(false)} onSelect={(b) => { setQuantizeBeats(b); setQOpen(false); }} />
       <LibraryBrowser visible={libOpen} library={library} mode={libMode} onClose={() => setLibOpen(false)} onChangeLibrary={onChangeLibrary} onPick={onPickFile} onImport={onImport} />
     </SafeAreaView>
   );

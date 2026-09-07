@@ -31,3 +31,21 @@ export const SIGNATURES = [
   { num: 6, den: 8 },
   { num: 7, den: 8 },
 ];
+
+// Launch/transition quantize values, in BEATS of the master clock. A pad switch
+// takes effect on the next boundary of this many beats. Sub-beat values (1/4,
+// 1/2) allow tight, fast transitions; larger values (4, 8) switch on bar lines.
+export const QUANTIZE_OPTIONS = [
+  { beats: 0, label: 'Off' },
+  { beats: 0.25, label: '1/4' },
+  { beats: 0.5, label: '1/2' },
+  { beats: 1, label: '1' },
+  { beats: 2, label: '2' },
+  { beats: 4, label: '4' },
+  { beats: 8, label: '8' },
+];
+
+export function quantizeLabel(beats) {
+  const o = QUANTIZE_OPTIONS.find((x) => x.beats === beats);
+  return o ? o.label : String(beats);
+}

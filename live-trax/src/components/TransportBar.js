@@ -8,8 +8,8 @@ import syncStore from '../audio/syncStore';
 // The beat dot reads the native transport directly (via syncStore), so it stays
 // sample-accurate without re-rendering the rest of the app.
 export default function TransportBar({
-  bpm, num, den, playing, quantize,
-  onTogglePlay, onOpenTempo, onOpenSignature, onToggleQuantize,
+  bpm, num, den, playing, quantizeLabel, quantizeActive,
+  onTogglePlay, onOpenTempo, onOpenSignature, onOpenQuantize,
 }) {
   const [beat, setBeat] = useState({ playing: false, beatInBar: 0 });
   useEffect(() => {
@@ -48,8 +48,9 @@ export default function TransportBar({
 
       <View style={styles.spacer} />
 
-      <Pressable onPress={onToggleQuantize} style={[styles.quant, quantize === 'bar' && styles.quantActive]}>
-        <Text style={[styles.quantText, quantize === 'bar' && { color: '#0E0E12' }]}>Q</Text>
+      <Pressable onPress={onOpenQuantize} style={[styles.quant, quantizeActive && styles.quantActive]}>
+        <Text style={styles.quantCap}>Q</Text>
+        <Text style={[styles.quantText, quantizeActive && { color: '#0E0E12' }]}>{quantizeLabel}</Text>
       </Pressable>
     </View>
   );
@@ -77,7 +78,8 @@ const styles = StyleSheet.create({
 
   spacer: { flex: 1 },
 
-  quant: { width: 38, height: 40, borderRadius: 10, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.surface, alignItems: 'center', justifyContent: 'center' },
+  quant: { flexDirection: 'row', alignItems: 'center', gap: 5, minWidth: 44, height: 40, paddingHorizontal: 10, borderRadius: 10, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.surface, justifyContent: 'center' },
+  quantCap: { color: theme.textFaint, fontWeight: '800', fontSize: 11 },
   quantActive: { backgroundColor: theme.accent, borderColor: theme.accent },
   quantText: { color: theme.textDim, fontWeight: '800', fontSize: 14 },
 });

@@ -176,19 +176,26 @@ struct LiveTraxCore::Impl {
     return quantizeBeats > 0 ? (ma_uint64)std::llround(quantizeBeats * framesPerBeat()) : 0;
   }
 
+  bool anyPlaying() {
+    for (auto& kv : pads)
+      if (kv.second->hasSound && ma_sound_is_playing(&kv.second->sound)) return true;
+    return false;
+  }
+  // The beat grid is "running" while a loop plays or the transport is on.
+  bool gridRunning() { return transportPlaying || anyPlaying(); }
+
   // Next grid boundary at/after now()+safety. If the transport is stopped or
   // quantize is off, returns a near-immediate frame.
   ma_uint64 nextBoundary() {
     ma_uint64 n = now();
     ma_uint64 safety = (ma_uint64)std::llround(sr() * 0.020); // 20ms headroom
-    if (!transportPlaying) return n + safety;
     ma_uint64 q = quantumFrames();
-    if (q == 0) return n + safety;
+    if (q == 0) return n + safety; // "Off": immediate
     ma_uint64 origin = transportStart;
     ma_uint64 t = n + safety;
     if (t < origin) return origin;
     ma_uint64 rel = t - origin;
-    ma_uint64 k = (rel + q - 1) / q; // ceil
+    ma_uint64 k = (rel + q - 1) / q; // ceil to the next beat-multiple boundary
     if (k == 0) k = 1;
     return origin + k * q;
   }
@@ -316,7 +323,7 @@ void LiveTraxCore::triggerSync(const std::string& id) {
     if (ma_sound_is_playing(&o->sound)) { fresh = false; break; }
   }
 
-  bool quantized = impl_->transportPlaying && impl_->quantumFrames() > 0;
+  bool quantized = !fresh && impl_->quantumFrames() > 0; // wait for the grid boundary
   ma_uint64 n = impl_->now();
   ma_uint64 startAt = quantized ? impl_->nextBoundary() : n; // absolute frame playback begins
   ma_uint64 startTime = quantized ? startAt : 0;             // 0 => play now
@@ -356,7 +363,7 @@ void LiveTraxCore::stopSync(const std::string& id) {
   if (it == impl_->pads.end() || !it->second->hasSound) return;
   StretchVoice* v = it->second.get();
 
-  bool quantized = impl_->transportPlaying && impl_->quantumFrames() > 0;
+  bool quantized = impl_->quantumFrames() > 0 && impl_->gridRunning();
   if (!quantized) { stop(id); return; } // immediate
 
   ma_uint64 b = impl_->nextBoundary();
@@ -490,15 +497,16 @@ double LiveTraxCore::transportInfo(int which) {
   double fpb = impl_->framesPerBeat();
   double fbar = impl_->framesPerBar();
   ma_uint64 n = impl_->now();
+  bool running = impl_->gridRunning();
   double pos = 0.0;
-  if (impl_->transportPlaying && n >= impl_->transportStart)
+  if (running && n >= impl_->transportStart)
     pos = (double)(n - impl_->transportStart);
   long barIndex = fbar > 0 ? (long)std::floor(pos / fbar) : 0;
   double inBar = pos - (double)barIndex * fbar;
   long beatInBar = fpb > 0 ? (long)std::floor(inBar / fpb) : 0;
   double phase = fpb > 0 ? (inBar - (double)beatInBar * fpb) / fpb : 0.0;
   switch (which) {
-    case 0: return impl_->transportPlaying ? 1.0 : 0.0;
+    case 0: return running ? 1.0 : 0.0;
     case 1: return (double)barIndex;
     case 2: return (double)beatInBar;
     case 3: return phase;
