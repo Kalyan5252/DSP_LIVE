@@ -59,6 +59,7 @@ class AudioEngine {
   // ---- sample edit ----
   setRegion(padId, startFrac, endFrac) { try { Native.setRegion(padId, startFrac, endFrac); } catch (e) {} }
   setPadGain(padId, linear) { try { Native.setPadGain(padId, linear); } catch (e) {} }
+  setPadChannelGain(padId, linear) { try { Native.setPadChannelGain(padId, linear); } catch (e) {} }
   setPadFades(padId, inMs, outMs) { try { Native.setPadFades(padId, inMs, outMs); } catch (e) {} }
   setPadPlayMode(padId, mode) { try { Native.setPadPlayMode(padId, mode); } catch (e) {} }
 
