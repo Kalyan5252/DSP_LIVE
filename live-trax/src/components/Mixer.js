@@ -20,14 +20,14 @@ export default function Mixer({ visible, mixer, onVol, onToggleSolo, onToggleMut
           </View>
 
           <View style={styles.row}>
-            {INSTRUMENTS.map((inst) => {
+            {INSTRUMENTS.map((inst, i) => {
               const vol = typeof m.vol[inst.key] === 'number' ? m.vol[inst.key] : 1;
               const solo = !!m.solo[inst.key];
               const mute = !!m.mute[inst.key];
               return (
                 <View key={inst.key} style={styles.channel}>
                   <View style={[styles.chip, { backgroundColor: inst.color }]} />
-                  <Text style={styles.chName} numberOfLines={1}>{inst.name}</Text>
+                  <Text style={styles.chName} numberOfLines={1}>Ch {i + 1}</Text>
                   <View style={styles.faderBox}>
                     <Slider vertical value={vol} min={0} max={1} onChange={(v) => onVol(inst.key, v)} style={styles.fader} />
                   </View>

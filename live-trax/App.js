@@ -62,6 +62,13 @@ function migrateProjectUris(projects) {
 }
 
 function defaultMixer() { return { vol: {}, solo: {}, mute: {} }; }
+function effChannel(mx, key) {
+  const anySolo = Object.values((mx && mx.solo) || {}).some(Boolean);
+  if (anySolo && !mx.solo[key]) return 0;
+  if (mx.mute && mx.mute[key]) return 0;
+  const v = mx.vol && mx.vol[key];
+  return typeof v === 'number' ? v : 1;
+}
 
 export default function App() {
   const [projects, setProjects] = useState(emptyProjects());
@@ -128,12 +135,8 @@ export default function App() {
 
   // Apply the mixer (channel volume + solo/mute) to every pad's channel gain.
   const applyMixer = useCallback((mx) => {
-    const anySolo = Object.values(mx.solo || {}).some(Boolean);
     INSTRUMENTS.forEach((inst) => {
-      let eff;
-      if (anySolo && !mx.solo[inst.key]) eff = 0;
-      else if (mx.mute[inst.key]) eff = 0;
-      else eff = typeof mx.vol[inst.key] === 'number' ? mx.vol[inst.key] : 1;
+      const eff = effChannel(mx, inst.key);
       ROWS.forEach((_, row) => engine.setPadChannelGain(padId(inst.key, row), eff));
     });
   }, []);
@@ -369,6 +372,7 @@ export default function App() {
     const loopBpm = file.bpm || bpm;
     setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name, bpm: file.bpm || null } }; persistPads(next); return next; });
     engine.load(id, resolveSampleUri(file.uri), { bpm: loopBpm, loop: true }).then((dur) => {
+      engine.setPadChannelGain(id, effChannel(mixerRef.current, target.instKey));
       setPads((prev) => {
         if (!prev[id]) return prev;
         const next = { ...prev, [id]: { ...prev[id], durationSec: dur } };
