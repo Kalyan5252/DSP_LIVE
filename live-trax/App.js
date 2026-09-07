@@ -414,7 +414,9 @@ export default function App() {
         projectName={projName}
         bpm={bpm} num={sig.num} den={sig.den}
         playing={isPlaying} quantizeLabel={quantizeLabel(quantizeBeats)} quantizeActive={quantizeBeats > 0}
+        editActive={editMode}
         onHome={goHome}
+        onToggleEdit={() => setEditMode((m) => !m)}
         onTogglePlay={onTogglePlay}
         onOpenTempo={() => setTempoOpen(true)}
         onOpenSignature={() => setSigOpen(true)}
@@ -425,7 +427,7 @@ export default function App() {
         <View style={styles.gridWrap}>
           <InstrumentGrid pads={pads} den={sig.den} onPadPress={onPadPress} onPadLong={onPadLong} />
         </View>
-        <RightRail onStopAll={onStopAll} onOpenLibrary={openLibraryManage} volume={volume} onVolume={onVolume} editActive={editMode} onToggleEdit={() => setEditMode((m) => !m)} />
+        <RightRail onStopAll={onStopAll} onOpenLibrary={openLibraryManage} volume={volume} onVolume={onVolume} />
       </View>
 
       <SignaturePicker visible={sigOpen} num={sig.num} den={sig.den} onClose={() => setSigOpen(false)} onSelect={(num, den) => { setSig({ num, den }); setSigOpen(false); }} />

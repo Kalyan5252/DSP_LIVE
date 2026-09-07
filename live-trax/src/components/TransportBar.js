@@ -1,15 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { theme } from '../theme';
-import { Home, Play, Pause, Chevron, Metronome } from './Icons';
+import { Home, Play, Pause, Chevron, Metronome, Pencil } from './Icons';
 import syncStore from '../audio/syncStore';
 
 // Top toolbar: home + project, transport (play, tempo, signature), and quantize.
 // The beat dot reads the native transport directly (via syncStore), so it stays
 // sample-accurate without re-rendering the rest of the app.
 export default function TransportBar({
-  projectName, bpm, num, den, playing, quantizeLabel, quantizeActive,
-  onHome, onTogglePlay, onOpenTempo, onOpenSignature, onOpenQuantize,
+  projectName, bpm, num, den, playing, quantizeLabel, quantizeActive, editActive,
+  onHome, onTogglePlay, onOpenTempo, onOpenSignature, onOpenQuantize, onToggleEdit,
 }) {
   const [beat, setBeat] = useState({ playing: false, beatInBar: 0 });
   useEffect(() => {
@@ -48,6 +48,11 @@ export default function TransportBar({
 
       <View style={styles.spacer} />
 
+      <Pressable onPress={onToggleEdit} style={[styles.edit, editActive && styles.editActive]}>
+        <Pencil size={15} color={editActive ? '#0E0E12' : theme.textDim} />
+        <Text style={[styles.editTxt, editActive && { color: '#0E0E12' }]}>Edit</Text>
+      </Pressable>
+
       <Pressable onPress={onOpenQuantize} style={[styles.quant, quantizeActive && styles.quantActive]}>
         <Text style={styles.quantCap}>Q</Text>
         <Text style={[styles.quantText, quantizeActive && { color: '#0E0E12' }]}>{quantizeLabel}</Text>
@@ -78,6 +83,9 @@ const styles = StyleSheet.create({
 
   spacer: { flex: 1 },
 
+  edit: { flexDirection: 'row', alignItems: 'center', gap: 6, height: 40, paddingHorizontal: 12, borderRadius: 10, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.surface, marginRight: 8 },
+  editActive: { backgroundColor: theme.accent, borderColor: theme.accent },
+  editTxt: { color: theme.textDim, fontWeight: '800', fontSize: 13 },
   quant: { flexDirection: 'row', alignItems: 'center', gap: 5, minWidth: 44, height: 40, paddingHorizontal: 10, borderRadius: 10, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.surface, justifyContent: 'center' },
   quantCap: { color: theme.textFaint, fontWeight: '800', fontSize: 11 },
   quantActive: { backgroundColor: theme.accent, borderColor: theme.accent },
