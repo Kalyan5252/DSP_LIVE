@@ -365,10 +365,12 @@ export default function App() {
       const asset = res.assets[0];
       const uri = await importSampleFile(asset.uri, asset.name || 'loop');
       const name = (asset.name || 'Loop').replace(/\.[^.]+$/, '');
-      let detected = 0;
-      try { detected = engine.estimateBpm(resolveSampleUri(uri)); } catch (e) { detected = 0; }
+      // Offline analysis pass: detect BPM + transient markers once, at import.
+      let analysis = null;
+      try { analysis = engine.analyzeSample(resolveSampleUri(uri)); } catch (e) { analysis = null; }
+      const detected = analysis && analysis.bpm > 0 ? analysis.bpm : 0;
       const loopBpm = detected > 0 ? detected : bpm;
-      const { lib } = addFile(library, { name, uri, bpm: loopBpm }, folderId);
+      const { lib } = addFile(library, { name, uri, bpm: loopBpm, analysis }, folderId);
       onChangeLibrary(lib);
     } catch (e) { /* ignore */ }
   }, [library, onChangeLibrary, bpm]);
@@ -378,7 +380,7 @@ export default function App() {
     if (!target) return;
     const id = padId(target.instKey, target.rowIndex);
     const loopBpm = file.bpm || bpm;
-    setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name, bpm: file.bpm || null } }; persistPads(next); return next; });
+    setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name, bpm: file.bpm || null, analysis: file.analysis || null } }; persistPads(next); return next; });
     engine.load(id, resolveSampleUri(file.uri), { bpm: loopBpm, loop: true }).then((dur) => {
       engine.setPadChannelGain(id, effChannel(mixerRef.current, target.instKey));
       engine.applyTempo();
