@@ -10,7 +10,7 @@ import {
 
 // The global library, as a right-side drawer (~half the app width) that respects
 // the safe area — it slides in from the right rather than covering the screen.
-export default function LibraryBrowser({ visible, library, mode, onClose, onChangeLibrary, onPick, onImport }) {
+export default function LibraryBrowser({ visible, library, missing, mode, onClose, onChangeLibrary, onPick, onImport }) {
   const [folderId, setFolderId] = useState(null);
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState({ name: '', color: LIB_COLORS[0], tags: '', bpm: '' });
@@ -123,17 +123,20 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
                 </Pressable>
               ))}
 
-              {files.map((f) => (
-                <Pressable key={f.id} style={styles.row} onPress={() => (mode === 'pick' ? onPick(f) : openEditor('file', f))} onLongPress={() => openEditor('file', f)}>
-                  <View style={[styles.chip, { backgroundColor: f.color }]} />
-                  <Text style={styles.rowName} numberOfLines={1}>{f.name}</Text>
-                  {f.bpm ? <Text style={styles.bpm}>{f.bpm} BPM</Text> : null}
-                  {f.tags && f.tags.length ? (
+              {files.map((f) => {
+                const gone = missing && missing[f.id];
+                return (
+                <Pressable key={f.id} style={[styles.row, gone && styles.rowGone]} onPress={() => (mode === 'pick' ? onPick(f) : openEditor('file', f))} onLongPress={() => openEditor('file', f)}>
+                  <View style={[styles.chip, { backgroundColor: gone ? theme.textFaint : f.color }]} />
+                  <Text style={[styles.rowName, gone && { color: theme.textDim }]} numberOfLines={1}>{f.name}</Text>
+                  {gone ? <Text style={styles.missing}>MISSING</Text> : (f.bpm ? <Text style={styles.bpm}>{f.bpm} BPM</Text> : null)}
+                  {!gone && f.tags && f.tags.length ? (
                     <View style={styles.tags}>{f.tags.slice(0, 2).map((t) => <Text key={t} style={styles.tag}>{t}</Text>)}</View>
                   ) : null}
-                  {mode === 'pick' ? <Text style={styles.use}>Use</Text> : <Chevron size={12} color={theme.textFaint} />}
+                  {mode === 'pick' ? <Text style={[styles.use, gone && { color: theme.textFaint }]}>Use</Text> : <Chevron size={12} color={theme.textFaint} />}
                 </Pressable>
-              ))}
+                );
+              })}
             </ScrollView>
 
             <Text style={styles.hint}>
@@ -207,6 +210,8 @@ const styles = StyleSheet.create({
   listContent: { paddingBottom: 8, gap: 6 },
   empty: { color: theme.textFaint, fontSize: 13, textAlign: 'center', paddingVertical: 28 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 11 },
+  rowGone: { opacity: 0.7, borderColor: theme.danger, borderStyle: 'dashed' },
+  missing: { color: theme.danger, fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
   chip: { width: 9, height: 22, borderRadius: 3 },
   rowName: { flex: 1, color: theme.text, fontSize: 14, fontWeight: '600' },
   bpm: { color: theme.good, fontSize: 11, fontWeight: '800', fontVariant: ['tabular-nums'] },

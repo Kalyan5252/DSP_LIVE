@@ -8,7 +8,7 @@ import { theme } from './src/theme';
 import { padId, quantizeLabel } from './src/config';
 import engine from './src/audio/engine';
 import syncStore from './src/audio/syncStore';
-import { importSampleFile, deleteSampleFile, resolveSampleUri } from './src/storage/store';
+import { importSampleFile, deleteSampleFile, resolveSampleUri, sampleRelPath, sampleExists } from './src/storage/store';
 import { emptyLibrary, addFile } from './src/storage/library';
 import {
   emptyProjects, createProject, updateProject, renameProject, deleteProject, getProject,
@@ -25,6 +25,39 @@ import ProjectHome from './src/components/ProjectHome';
 const OLD_BOARD_KEY = 'livetrax.board.v1';
 const PROJECTS_KEY = 'livetrax.projects.v1';
 const LIB_KEY = 'livetrax.library.v1';
+
+// One-time normalization: rewrite any legacy ABSOLUTE sample uris to stable
+// app-relative refs ("samples/<file>"), so they resolve against the current
+// document directory after every rebuild.
+function migrateLibraryUris(lib) {
+  if (!lib || !lib.files) return { lib, changed: false };
+  let changed = false;
+  const files = {};
+  for (const id of Object.keys(lib.files)) {
+    const f = lib.files[id];
+    const rel = sampleRelPath(f.uri);
+    if (rel !== f.uri) changed = true;
+    files[id] = { ...f, uri: rel };
+  }
+  return { lib: changed ? { ...lib, files } : lib, changed };
+}
+function migrateProjectUris(projects) {
+  if (!projects || !projects.byId) return { projects, changed: false };
+  let changed = false;
+  const byId = {};
+  for (const id of Object.keys(projects.byId)) {
+    const p = projects.byId[id];
+    const pads = {};
+    for (const pid of Object.keys(p.pads || {})) {
+      const pd = p.pads[pid];
+      const rel = sampleRelPath(pd.uri);
+      if (rel !== pd.uri) changed = true;
+      pads[pid] = { ...pd, uri: rel };
+    }
+    byId[id] = { ...p, pads };
+  }
+  return { projects: changed ? { ...projects, byId } : projects, changed };
+}
 
 export default function App() {
   const [projects, setProjects] = useState(emptyProjects());
@@ -45,6 +78,7 @@ export default function App() {
   const [library, setLibrary] = useState(emptyLibrary());
   const [libOpen, setLibOpen] = useState(false);
   const [libMode, setLibMode] = useState('manage');
+  const [missing, setMissing] = useState({}); // library fileId -> true when file is gone
   const pickTargetRef = useRef(null);
 
   const padsRef = useRef({}); padsRef.current = pads;
@@ -67,6 +101,19 @@ export default function App() {
   }, [saveProjects]);
   const persistPads = useCallback((nextPads) => { writeCurrent({ pads: nextPads }); }, [writeCurrent]);
 
+  // Flag library files whose audio is missing on disk (e.g. lost in a prior
+  // container reset) so the user can spot and re-import them.
+  const refreshMissing = useCallback(async (lib) => {
+    const files = Object.values((lib && lib.files) || {});
+    const next = {};
+    for (const f of files) {
+      // eslint-disable-next-line no-await-in-loop
+      const ok = await sampleExists(f.uri);
+      if (!ok) next[f.id] = true;
+    }
+    setMissing(next);
+  }, []);
+
   // ---- boot: load library + projects (migrate a legacy single board) ----
   useEffect(() => {
     let mounted = true;
@@ -77,13 +124,22 @@ export default function App() {
       try {
         const rawLib = await AsyncStorage.getItem(LIB_KEY);
         if (rawLib && mounted) {
-          const lib = JSON.parse(rawLib);
-          if (lib && lib.folders && lib.files) setLibrary(lib);
+          const parsedLib = JSON.parse(rawLib);
+          if (parsedLib && parsedLib.folders && parsedLib.files) {
+            const { lib, changed } = migrateLibraryUris(parsedLib);
+            setLibrary(lib);
+            if (changed) AsyncStorage.setItem(LIB_KEY, JSON.stringify(lib)).catch(() => {});
+            refreshMissing(lib);
+          }
         }
         const rawPrj = await AsyncStorage.getItem(PROJECTS_KEY);
         if (rawPrj) {
           const parsed = JSON.parse(rawPrj);
-          if (parsed && parsed.order && parsed.byId && mounted) { saveProjects(parsed); return; }
+          if (parsed && parsed.order && parsed.byId && mounted) {
+            const { projects: mig } = migrateProjectUris(parsed);
+            saveProjects(mig);
+            return;
+          }
         }
         const rawOld = await AsyncStorage.getItem(OLD_BOARD_KEY);
         if (rawOld && mounted) {
@@ -108,7 +164,7 @@ export default function App() {
       engine.disposeClock();
       engine.unloadAll();
     };
-  }, [saveProjects]);
+  }, [saveProjects, refreshMissing]);
 
   // Apply engine settings live while a project is open.
   useEffect(() => { if (currentId) engine.setMasterTempo(bpm); }, [bpm, currentId]);
@@ -187,6 +243,7 @@ export default function App() {
     setLibrary(next);
     AsyncStorage.setItem(LIB_KEY, JSON.stringify(next)).catch(() => {});
     if (opts && opts.uris) opts.uris.forEach((u) => deleteSampleFile(u));
+    refreshMissing(next);
     // Reconcile the open board's pads with library BPM edits (re-slice + re-lock).
     const byUri = {};
     Object.values(next.files || {}).forEach((f) => { byUri[f.uri] = f; });
@@ -206,7 +263,7 @@ export default function App() {
       persistPads(out);
       return out;
     });
-  }, [persistPads]);
+  }, [persistPads, refreshMissing]);
 
   const onImport = useCallback(async (folderId) => {
     try {
@@ -321,7 +378,7 @@ export default function App() {
       <SignaturePicker visible={sigOpen} num={sig.num} den={sig.den} onClose={() => setSigOpen(false)} onSelect={(num, den) => { setSig({ num, den }); setSigOpen(false); }} />
       <TempoDial visible={tempoOpen} bpm={bpm} onClose={() => setTempoOpen(false)} onChange={(v) => setBpm(Math.max(20, Math.min(300, Math.round(v))))} />
       <QuantizePicker visible={qOpen} value={quantizeBeats} onClose={() => setQOpen(false)} onSelect={(b) => { setQuantizeBeats(b); setQOpen(false); }} />
-      <LibraryBrowser visible={libOpen} library={library} mode={libMode} onClose={() => setLibOpen(false)} onChangeLibrary={onChangeLibrary} onPick={onPickFile} onImport={onImport} />
+      <LibraryBrowser visible={libOpen} library={library} missing={missing} mode={libMode} onClose={() => setLibOpen(false)} onChangeLibrary={onChangeLibrary} onPick={onPickFile} onImport={onImport} />
     </SafeAreaView>
   );
 }

@@ -58,7 +58,18 @@ export async function importSampleFile(sourceUri, originalName) {
   const rel = `samples/${stamp}_${safeName(originalName)}`;
   const dest = FileSystem.documentDirectory + rel;
   await FileSystem.copyAsync({ from: sourceUri, to: dest });
+  // Confirm the file actually landed in app storage before we hand back a ref.
+  const info = await FileSystem.getInfoAsync(dest);
+  if (!info || !info.exists) throw new Error('sample copy failed: ' + dest);
   return rel;
+}
+
+// Does a stored sample ref point at a file that exists on disk right now?
+export async function sampleExists(stored) {
+  try {
+    const info = await FileSystem.getInfoAsync(resolveSampleUri(stored));
+    return !!(info && info.exists);
+  } catch (e) { return false; }
 }
 
 // Remove a stored sample file (best effort). Accepts relative or absolute refs.
