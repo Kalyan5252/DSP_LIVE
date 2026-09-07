@@ -6,6 +6,7 @@
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <mutex>
 #include <cmath>
 #include <algorithm>
 #include <string>
@@ -30,6 +31,24 @@ struct StretchVoice {
   ma_uint64 origFrames = 0;
   double baseBpm = 120.0;
   bool loop = true;
+
+  // immutable ORIGINAL (used to (re)render + draw the waveform); `orig` above is
+  // the CURRENT playback buffer (rendered to the master tempo, so playback is a
+  // cheap ratio-1 read).
+  std::vector<float> orig0;
+  ma_uint64 origFrames0 = 0;
+  double baseBpm0 = 120.0;
+
+  // trim region kept as fractions so it survives a buffer swap.
+  double regionStartFrac = 0.0, regionEndFrac = 1.0;
+
+  // pre-render handoff (bg fills `pending`, audio thread swaps it into `orig`).
+  std::vector<float> pending;
+  ma_uint64 pendingFrames = 0;
+  double pendingBpm = 0.0;
+  std::atomic<bool> pendingReady{false};
+  std::mutex swapMtx;
+  std::atomic<double> masterBpmA{120.0};
 
   // live control
   std::atomic<double> ratio{1.0}; // input/output = masterBpm / baseBpm
@@ -344,6 +363,11 @@ bool LiveTraxCore::loadPad(const std::string& id, const std::string& path, doubl
   v->baseBpm = bpm > 0 ? bpm : impl_->masterBpm;
   v->loop = loop;
   if (!impl_->decode(path, v.get())) return false;
+  v->orig0 = v->orig;                 // keep the immutable original
+  v->origFrames0 = v->origFrames;
+  v->baseBpm0 = v->baseBpm;
+  v->regionStartFrac = 0.0;
+  v->regionEndFrac = 1.0;
   v->regionStart = 0;
   v->regionEnd = v->origFrames;
   v->gain.store(1.0f);
@@ -672,6 +696,9 @@ void LiveTraxCore::setRegion(const std::string& id, double startFrac, double end
   if (v->origFrames == 0) return;
   double s = std::min(1.0, std::max(0.0, startFrac));
   double e = std::min(1.0, std::max(0.0, endFrac));
+  if (e <= s) e = std::min(1.0, s + 0.001);
+  v->regionStartFrac = s;
+  v->regionEndFrac = e;
   ma_uint64 sf = (ma_uint64)(s * (double)v->origFrames);
   ma_uint64 ef = (ma_uint64)(e * (double)v->origFrames);
   if (ef <= sf) ef = sf + 1;
@@ -715,7 +742,8 @@ const char* LiveTraxCore::waveform(const std::string& id, int buckets) {
   auto it = impl_->pads.find(id);
   if (it == impl_->pads.end()) return buf.c_str();
   StretchVoice* v = it->second.get();
-  ma_uint64 total = v->origFrames;
+  const std::vector<float>& wav = v->orig0.empty() ? v->orig : v->orig0;
+  ma_uint64 total = v->orig0.empty() ? v->origFrames : v->origFrames0;
   int ch = v->channels;
   if (total == 0) return buf.c_str();
   int n = buckets < 8 ? 8 : (buckets > 4096 ? 4096 : buckets);
@@ -727,7 +755,7 @@ const char* LiveTraxCore::waveform(const std::string& id, int buckets) {
     if (e > total) e = total;
     float peak = 0.f;
     for (ma_uint64 f = s; f < e; ++f) {
-      const float* src = &v->orig[(size_t)f * ch];
+      const float* src = &wav[(size_t)f * ch];
       for (int c = 0; c < ch; ++c) { float a = std::fabs(src[c]); if (a > peak) peak = a; }
     }
     if (peak > 1.f) peak = 1.f;
