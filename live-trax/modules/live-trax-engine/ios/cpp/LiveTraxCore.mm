@@ -58,6 +58,7 @@ struct StretchVoice {
   std::atomic<float> channelGain{1.0f}; // linear (mixer channel volume * mute/solo)
   int fadeInFrames = 0, fadeOutFrames = 0;
   int playMode = 0;                     // 0 loop | 1 one-shot | 2 gate
+  bool bypassing = false;               // true when playing at native tempo (no stretch)
 
   ma_uint64 regEnd() const { return regionEnd > regionStart ? regionEnd : origFrames; }
   ma_uint64 regionLen() const { ma_uint64 e = regEnd(); return e > regionStart ? e - regionStart : 1; }
@@ -99,34 +100,61 @@ static ma_result voice_read(ma_data_source* ds, void* pOut, ma_uint64 frameCount
   const int mode = v->playMode;
   if (v->inPos < regStart || v->inPos > regEnd) v->inPos = regStart;
 
-  while (done < frameCount) {
-    int block = (int)std::min<ma_uint64>(frameCount - done, kMaxBlock);
-    int inNeed = std::max(1, (int)std::llround(block * r));
+  // envFor: fade-in/out + gain envelope at the voice's current input position.
+  auto envFor = [&]() -> float {
+    float env = gain;
+    ma_uint64 pos = v->inPos - regStart;
+    if (fIn > 0 && pos < (ma_uint64)fIn) env *= (float)pos / (float)fIn;
+    if (fOut > 0) {
+      ma_uint64 fromEnd = (regionLen > pos) ? (regionLen - 1 - pos) : 0;
+      if (fromEnd < (ma_uint64)fOut) env *= (float)fromEnd / (float)fOut;
+    }
+    return env;
+  };
 
-    // gather inNeed input frames within the trim region, applying gain + fades.
-    for (int i = 0; i < inNeed; ++i) {
+  // BYPASS: at (near) native tempo the stretcher is unnecessary — a straight copy
+  // is ~free, so many loops can play at once without overloading the audio thread
+  // (the real cause of noise with several simultaneous samples). Reset the
+  // stretcher when transitioning back to stretching so there's no stale-state click.
+  const bool bypass = std::fabs(r - 1.0) < 0.01;
+  if (bypass != v->bypassing) { v->bypassing = bypass; if (!bypass) v->stretch.reset(); }
+
+  if (bypass) {
+    ma_uint64 f = 0;
+    for (; f < frameCount; ++f) {
       if (v->inPos >= regEnd) {
-        if (mode == 0) v->inPos = regStart;            // loop
-        else { for (int c = 0; c < ch; ++c) v->inCh[c][i] = 0.f; continue; } // one-shot/gate
+        if (mode == 0) v->inPos = regStart;
+        else break; // one-shot/gate: done
       }
-      float env = gain;
-      ma_uint64 pos = v->inPos - regStart;             // position within region
-      if (fIn > 0 && pos < (ma_uint64)fIn) env *= (float)pos / (float)fIn;
-      if (fOut > 0) {
-        ma_uint64 fromEnd = (regionLen > pos) ? (regionLen - 1 - pos) : 0;
-        if (fromEnd < (ma_uint64)fOut) env *= (float)fromEnd / (float)fOut;
-      }
+      float env = envFor();
       const float* src = &v->orig[(size_t)v->inPos * ch];
-      for (int c = 0; c < ch; ++c) v->inCh[c][i] = src[c] * env;
+      for (int c = 0; c < ch; ++c) out[(size_t)f * ch + c] = src[c] * env;
       v->inPos++;
     }
+    for (; f < frameCount; ++f) for (int c = 0; c < ch; ++c) out[(size_t)f * ch + c] = 0.f;
+  } else {
+    while (done < frameCount) {
+      int block = (int)std::min<ma_uint64>(frameCount - done, kMaxBlock);
+      int inNeed = std::max(1, (int)std::llround(block * r));
 
-    v->stretch.process(v->inPtr, inNeed, v->outPtr, block);
+      for (int i = 0; i < inNeed; ++i) {
+        if (v->inPos >= regEnd) {
+          if (mode == 0) v->inPos = regStart;
+          else { for (int c = 0; c < ch; ++c) v->inCh[c][i] = 0.f; continue; }
+        }
+        float env = envFor();
+        const float* src = &v->orig[(size_t)v->inPos * ch];
+        for (int c = 0; c < ch; ++c) v->inCh[c][i] = src[c] * env;
+        v->inPos++;
+      }
 
-    for (int i = 0; i < block; ++i)
-      for (int c = 0; c < ch; ++c) out[(size_t)(done + i) * ch + c] = v->outCh[c][i];
+      v->stretch.process(v->inPtr, inNeed, v->outPtr, block);
 
-    done += block;
+      for (int i = 0; i < block; ++i)
+        for (int c = 0; c < ch; ++c) out[(size_t)(done + i) * ch + c] = v->outCh[c][i];
+
+      done += block;
+    }
   }
 
   if (mode != 0 && v->inPos >= regEnd) v->ended = true; // one-shot/gate: stop after the tail
@@ -321,7 +349,7 @@ bool LiveTraxCore::loadPad(const std::string& id, const std::string& path, doubl
   v->gain.store(1.0f);
   v->playMode = loop ? 0 : 1;
   v->allocScratch();
-  v->stretch.presetDefault(v->channels, (float)v->sampleRate);
+  v->stretch.presetCheaper(v->channels, (float)v->sampleRate); // lower CPU + split work (polyphony)
   v->inLatency = v->stretch.inputLatency();
   v->ratio.store(impl_->ratioFor(v.get()));
 
