@@ -87,8 +87,12 @@ export default function SampleEditor({ visible, padId, name, bpm, waveform, edit
               <Line x1={ex} y1={0} x2={ex} y2={H} stroke="#fff" strokeWidth={2} />
             </Svg>
             <Playhead padId={padId} startFrac={region.startFrac} endFrac={region.endFrac} width={waveW} height={H} />
-            <View style={[styles.handle, { left: sx - 16 }]} {...startPan.current.panHandlers} />
-            <View style={[styles.handle, { left: ex - 16 }]} {...endPan.current.panHandlers} />
+            <View style={[styles.handle, { left: sx - 18 }]} {...startPan.current.panHandlers}>
+              <View style={[styles.grip, styles.gripTop]}><View style={styles.gripBar} /><View style={styles.gripBar} /></View>
+            </View>
+            <View style={[styles.handle, { left: ex - 18 }]} {...endPan.current.panHandlers}>
+              <View style={[styles.grip, styles.gripBottom]}><View style={styles.gripBar} /><View style={styles.gripBar} /></View>
+            </View>
           </View>
 
           <View style={styles.modes}>
@@ -184,7 +188,11 @@ const styles = StyleSheet.create({
   closeTxt: { color: theme.textDim, fontSize: 15, fontWeight: '700' },
 
   wave: { borderRadius: 10, overflow: 'hidden', backgroundColor: '#120C0E', borderWidth: 1, borderColor: theme.border, marginBottom: 12 },
-  handle: { position: 'absolute', top: 0, bottom: 0, width: 32 },
+  handle: { position: 'absolute', top: 0, bottom: 0, width: 36, alignItems: 'center' },
+  grip: { position: 'absolute', width: 18, height: 30, borderRadius: 6, backgroundColor: '#fff', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3 },
+  gripTop: { top: 6 },
+  gripBottom: { bottom: 6 },
+  gripBar: { width: 2, height: 12, borderRadius: 1, backgroundColor: 'rgba(10,10,14,0.45)' },
 
   modes: { flexDirection: 'row', gap: 8, marginBottom: 12 },
   mode: { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.surface },
