@@ -56,6 +56,21 @@ class AudioEngine {
 
   setPadBpm(padId, bpm) { try { Native.setPadBpm(padId, bpm > 0 ? bpm : this.masterBpm); } catch (e) { /* not built */ } }
 
+  // ---- sample edit ----
+  setRegion(padId, startFrac, endFrac) { try { Native.setRegion(padId, startFrac, endFrac); } catch (e) {} }
+  setPadGain(padId, linear) { try { Native.setPadGain(padId, linear); } catch (e) {} }
+  setPadFades(padId, inMs, outMs) { try { Native.setPadFades(padId, inMs, outMs); } catch (e) {} }
+  setPadPlayMode(padId, mode) { try { Native.setPadPlayMode(padId, mode); } catch (e) {} }
+
+  // Downsampled waveform peaks (0..1) for the sample editor; [] if unavailable.
+  getWaveform(padId, buckets = 240) {
+    try {
+      const raw = Native.getWaveform(padId, buckets);
+      if (!raw) return [];
+      return raw.split(',').filter((x) => x.length).map((x) => parseFloat(x) || 0);
+    } catch (e) { return []; }
+  }
+
   setMasterSignature(num, den) {
     if (num > 0) this.sigNum = num;
     if (den > 0) this.sigDen = den;
