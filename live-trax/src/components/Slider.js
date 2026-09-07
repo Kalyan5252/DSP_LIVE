@@ -16,34 +16,41 @@ export default function Slider({
   const frac = clamp((value - min) / (max - min), 0, 1);
   const av = useRef(new Animated.Value(frac)).current;
   const dragging = useRef(false);
+  const curFrac = useRef(frac);          // latest fraction shown
+  const startFrac = useRef(frac);        // fraction at the moment the drag began
   const [labelVal, setLabelVal] = useState(value);
   const lastApply = useRef(0);
   const lastLabel = useRef(0);
 
   // Follow external value changes only when the user isn't dragging.
   useEffect(() => {
-    if (!dragging.current) { av.setValue(frac); setLabelVal(value); }
+    if (!dragging.current) { curFrac.current = frac; av.setValue(frac); setLabelVal(value); }
   }, [value, frac, av]);
 
-  const fracFromEvent = (e) => {
-    const inner = Math.max(1, sizeRef.current - pad * 2);
-    if (vertical) return clamp(1 - (e.nativeEvent.locationY - pad) / inner, 0, 1);
-    return clamp((e.nativeEvent.locationX - pad) / inner, 0, 1);
-  };
+  const inner = () => Math.max(1, sizeRef.current - pad * 2);
   const emit = (f, commit) => {
+    curFrac.current = f;
+    av.setValue(f);
     const val = min + f * (max - min);
     const now = Date.now();
     if (commit || now - lastApply.current > 40) { lastApply.current = now; onChange && onChange(val); }
     if (commit || now - lastLabel.current > 90) { lastLabel.current = now; setLabelVal(val); }
   };
+  // RELATIVE dragging: move the handle by the drag distance from where it started,
+  // so grabbing the thumb never makes it jump to the finger.
+  const move = (g, commit) => {
+    const d = vertical ? -g.dy : g.dx;
+    const f = clamp(startFrac.current + d / inner(), 0, 1);
+    emit(f, commit);
+  };
 
   const pan = useRef(PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
-    onPanResponderGrant: (e) => { dragging.current = true; const f = fracFromEvent(e); av.setValue(f); emit(f, false); },
-    onPanResponderMove: (e) => { const f = fracFromEvent(e); av.setValue(f); emit(f, false); },
-    onPanResponderRelease: (e) => { const f = fracFromEvent(e); av.setValue(f); dragging.current = false; emit(f, true); },
-    onPanResponderTerminate: (e) => { const f = fracFromEvent(e); av.setValue(f); dragging.current = false; emit(f, true); },
+    onPanResponderGrant: () => { dragging.current = true; startFrac.current = curFrac.current; },
+    onPanResponderMove: (e, g) => move(g, false),
+    onPanResponderRelease: (e, g) => { move(g, true); dragging.current = false; },
+    onPanResponderTerminate: (e, g) => { move(g, true); dragging.current = false; },
   })).current;
 
   const pctStr = av.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });

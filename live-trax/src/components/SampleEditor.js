@@ -136,12 +136,13 @@ function Playhead({ padId, startFrac, endFrac, width, height }) {
 
 function makeHandlePan(get, width, draggingRef, set) {
   const obj = {};
+  let start = 0; // fraction captured when the drag begins (relative dragging)
   obj.panHandlers = PanResponder.create({
     onStartShouldSetPanResponder: () => true,
     onMoveShouldSetPanResponder: () => true,
-    onPanResponderGrant: () => { draggingRef.current = true; },
-    onPanResponderMove: (ev, g) => { const wpx = width(); if (wpx) set(get() + g.dx / wpx, false); },
-    onPanResponderRelease: (ev, g) => { const wpx = width(); if (wpx) set(get() + g.dx / wpx, true); draggingRef.current = false; },
+    onPanResponderGrant: () => { draggingRef.current = true; start = get(); },
+    onPanResponderMove: (ev, g) => { const wpx = width(); if (wpx) set(start + g.dx / wpx, false); },
+    onPanResponderRelease: (ev, g) => { const wpx = width(); if (wpx) set(start + g.dx / wpx, true); draggingRef.current = false; },
     onPanResponderTerminate: () => { draggingRef.current = false; },
   }).panHandlers;
   return obj;
