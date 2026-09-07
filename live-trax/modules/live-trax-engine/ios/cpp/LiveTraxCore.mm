@@ -49,6 +49,7 @@ struct StretchVoice {
   std::atomic<bool> pendingReady{false};
   std::mutex swapMtx;
   std::atomic<double> masterBpmA{120.0};
+  double lastRenderTarget = -1.0; // JS-thread only: bpm the playback buffer was rendered to
 
   // live control
   std::atomic<double> ratio{1.0}; // input/output = masterBpm / baseBpm
@@ -323,6 +324,46 @@ struct LiveTraxCore::Impl {
     return origin + k * q;
   }
 
+  // Offline-warp the ORIGINAL to `target` bpm and hand the buffer to the audio
+  // thread. Playback then reads it at ratio 1 (cheap), so many loops at any tempo
+  // cost almost nothing. Runs on the JS thread (applyTempo), never the audio one.
+  void renderVoice(StretchVoice* v, double target) {
+    if (!v || v->origFrames0 == 0 || v->baseBpm0 <= 0 || target <= 0) return;
+    if (std::fabs(v->lastRenderTarget - target) < 0.01) return; // already at this tempo
+    const int ch = v->channels;
+    const ma_uint64 inN = v->origFrames0;
+    double factor = v->baseBpm0 / target;               // output/input length ratio
+    ma_uint64 outN = (ma_uint64)std::llround((double)inN * factor);
+    if (outN < 8) outN = 8;
+
+    std::vector<std::vector<float>> in(ch, std::vector<float>(inN, 0.f));
+    std::vector<std::vector<float>> out(ch, std::vector<float>(outN, 0.f));
+    for (ma_uint64 f = 0; f < inN; ++f)
+      for (int c = 0; c < ch; ++c) in[c][f] = v->orig0[(size_t)f * ch + c];
+    std::vector<float*> inP(ch), outP(ch);
+    for (int c = 0; c < ch; ++c) { inP[c] = in[c].data(); outP[c] = out[c].data(); }
+
+    signalsmith::stretch::SignalsmithStretch<float> st;
+    st.presetDefault(ch, (float)v->sampleRate);
+    // Prime once (warm the stretcher on the looping input), then capture the
+    // steady-state pass so the rendered loop joins seamlessly end-to-start.
+    st.process(inP.data(), (int)inN, outP.data(), (int)outN);
+    st.process(inP.data(), (int)inN, outP.data(), (int)outN);
+
+    std::vector<float> staged((size_t)outN * ch, 0.f);
+    for (ma_uint64 f = 0; f < outN; ++f)
+      for (int c = 0; c < ch; ++c) staged[(size_t)f * ch + c] = out[c][f];
+
+    {
+      std::lock_guard<std::mutex> lk(v->swapMtx);
+      v->pending.swap(staged);
+      v->pendingFrames = outN;
+      v->pendingBpm = target;
+      v->pendingReady.store(true, std::memory_order_release);
+    }
+    v->lastRenderTarget = target;
+  }
+
   bool decode(const std::string& path, StretchVoice* v) {
     ma_decoder_config dc = ma_decoder_config_init(ma_format_f32, 0, 0);
     ma_decoder dec;
@@ -391,6 +432,7 @@ bool LiveTraxCore::loadPad(const std::string& id, const std::string& path, doubl
   v->orig0 = v->orig;                 // keep the immutable original
   v->origFrames0 = v->origFrames;
   v->baseBpm0 = v->baseBpm;
+  v->lastRenderTarget = v->baseBpm0;
   v->regionStartFrac = 0.0;
   v->regionEndFrac = 1.0;
   v->regionStart = 0;
@@ -550,10 +592,21 @@ void LiveTraxCore::setPadBpm(const std::string& id, double bpm) {
   if (it == impl_->pads.end()) return;
   StretchVoice* v = it->second.get();
   v->baseBpm = bpm > 0 ? bpm : impl_->masterBpm;
+  v->baseBpm0 = v->baseBpm;         // the loop's corrected source tempo
+  v->lastRenderTarget = -1.0;       // force a re-render at the next applyTempo
+  v->masterBpmA.store(impl_->masterBpm);
   v->ratio.store(impl_->ratioFor(v));
 }
 
-void LiveTraxCore::applyTempo() { setMasterTempo(impl_->masterBpm); }
+// Warp every loaded loop to the current master tempo (called from JS on tempo
+// settle). Live tempo drags still use setMasterTempo for smoothness; this makes
+// the steady state cheap.
+void LiveTraxCore::applyTempo() {
+  double target = impl_->masterBpm;
+  for (auto& kv : impl_->pads) {
+    if (kv.second->hasSound) impl_->renderVoice(kv.second.get(), target);
+  }
+}
 
 double LiveTraxCore::padDuration(const std::string& id) {
   auto it = impl_->pads.find(id);
