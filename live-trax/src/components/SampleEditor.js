@@ -9,7 +9,8 @@ import Slider from './Slider';
 export const DEFAULT_EDIT = { gain: 1, startFrac: 0, endFrac: 1, fadeInMs: 0, fadeOutMs: 0, playMode: 0 };
 const MODES = [{ m: 0, label: 'Loop' }, { m: 1, label: 'One shot' }, { m: 2, label: 'Gate' }];
 const H = 160;
-const VPAD = 6; // small vertical inset so the envelope never clips the border
+const VPAD = 3; // tiny inset so the envelope doesn't touch the border
+const OVER = 20; // how far the grip tips overhang outside the spectrum
 
 // On-screen sample editor (centered modal, like the tempo dial). Waveform with
 // draggable start/end trim, play mode, gain, fades, and tempo. The waveform path
@@ -79,13 +80,15 @@ export default function SampleEditor({ visible, padId, name, bpm, waveform, edit
             <Pressable style={styles.close} onPress={onClose}><Text style={styles.closeTxt}>✕</Text></Pressable>
           </View>
 
-          <View style={[styles.wave, { height: H }]}>
-            <Svg width={waveW} height={H}>
-              {wavePath ? <Path d={wavePath} fill={theme.danger} opacity={0.9} /> : null}
-              <Rect x={0} y={0} width={sx} height={H} fill="rgba(8,6,7,0.6)" />
-              <Rect x={ex} y={0} width={Math.max(0, waveW - ex)} height={H} fill="rgba(8,6,7,0.6)" />
-            </Svg>
-            <Playhead padId={padId} startFrac={region.startFrac} endFrac={region.endFrac} width={waveW} height={H} />
+          <View style={styles.waveWrap}>
+            <View style={[styles.spectrum, { height: H }]}>
+              <Svg width={waveW} height={H}>
+                {wavePath ? <Path d={wavePath} fill={theme.danger} opacity={0.9} /> : null}
+                <Rect x={0} y={0} width={sx} height={H} fill="rgba(8,6,7,0.6)" />
+                <Rect x={ex} y={0} width={Math.max(0, waveW - ex)} height={H} fill="rgba(8,6,7,0.6)" />
+              </Svg>
+              <Playhead padId={padId} startFrac={region.startFrac} endFrac={region.endFrac} width={waveW} height={H} />
+            </View>
             <View style={[styles.handle, { left: sx - 18 }]} {...startPan.current.panHandlers}>
               <View style={styles.hLine} />
               <View style={[styles.grip, styles.gripTop]}><View style={styles.gripBar} /><View style={styles.gripBar} /></View>
@@ -193,13 +196,14 @@ const styles = StyleSheet.create({
   close: { width: 36, height: 36, borderRadius: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border },
   closeTxt: { color: theme.textDim, fontSize: 15, fontWeight: '700' },
 
-  wave: { borderRadius: 10, overflow: 'hidden', backgroundColor: '#120C0E', borderWidth: 1, borderColor: theme.border, marginBottom: 12 },
-  handle: { position: 'absolute', top: 0, bottom: 0, width: 36, alignItems: 'center' },
-  hLine: { position: 'absolute', top: 0, bottom: 0, width: 2, backgroundColor: '#fff' },
-  grip: { position: 'absolute', width: 20, height: 22, borderRadius: 6, backgroundColor: '#fff', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3 },
-  gripTop: { top: 3 },
-  gripBottom: { bottom: 3 },
-  gripBar: { width: 2, height: 10, borderRadius: 1, backgroundColor: 'rgba(10,10,14,0.5)' },
+  waveWrap: { position: 'relative', marginTop: OVER, marginBottom: OVER + 12 },
+  spectrum: { borderRadius: 10, overflow: 'hidden', backgroundColor: '#120C0E', borderWidth: 1, borderColor: theme.border },
+  handle: { position: 'absolute', top: -OVER, bottom: -OVER, width: 36, alignItems: 'center' },
+  hLine: { position: 'absolute', top: OVER, bottom: OVER, width: 2, backgroundColor: '#fff' },
+  grip: { position: 'absolute', width: 20, height: OVER, borderRadius: 5, backgroundColor: '#fff', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3 },
+  gripTop: { top: 0 },
+  gripBottom: { bottom: 0 },
+  gripBar: { width: 2, height: 9, borderRadius: 1, backgroundColor: 'rgba(10,10,14,0.5)' },
 
   modes: { flexDirection: 'row', gap: 8, marginBottom: 12 },
   mode: { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.surface },
