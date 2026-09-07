@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Modal, View, Text, Pressable, StyleSheet, PanResponder, Dimensions } from 'react-native';
+import { Modal, View, Text, Pressable, ScrollView, StyleSheet, PanResponder, Dimensions } from 'react-native';
 import Svg, { Path, Rect, Line } from 'react-native-svg';
 import { theme } from '../theme';
 import { Play, Pause } from './Icons';
@@ -16,8 +16,11 @@ const H = 150;
 // while audio plays.
 export default function SampleEditor({ visible, padId, name, bpm, waveform, edit, onChange, onSetBpm, onPreview, onClose }) {
   const e = { ...DEFAULT_EDIT, ...(edit || {}) };
-  const [w, setW] = useState(Math.min(880, Dimensions.get('window').width * 0.9));
-  const waveW = w;
+  const screen = Dimensions.get('window');
+  const [w, setW] = useState(Math.min(760, screen.width * 0.92));
+  const maxH = screen.height * 0.88;
+  const PAD = 16;
+  const waveW = Math.max(80, w - PAD * 2);
 
   // Local trim region for smooth dragging; syncs from props when not dragging.
   const [region, setRegion] = useState({ startFrac: e.startFrac, endFrac: e.endFrac });
@@ -62,7 +65,8 @@ export default function SampleEditor({ visible, padId, name, bpm, waveform, edit
   return (
     <Modal visible={visible} transparent animationType="fade" supportedOrientations={['landscape', 'landscape-left', 'landscape-right', 'portrait']} onRequestClose={onClose}>
       <Pressable style={styles.backdrop} onPress={onClose}>
-        <Pressable style={[styles.card, { width: w }]} onPress={() => {}} onLayout={(ev) => setW(ev.nativeEvent.layout.width)}>
+        <Pressable style={[styles.card, { width: w, maxHeight: maxH }]} onPress={() => {}} onLayout={(ev) => setW(ev.nativeEvent.layout.width)}>
+          <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator bounces={false}>
           <View style={styles.header}>
             <Pressable style={[styles.play, playing && styles.playActive]} onPress={onPreview}>
               {playing ? <Pause size={16} color="#0E0E12" /> : <Play size={16} color={theme.text} />}
@@ -113,6 +117,7 @@ export default function SampleEditor({ visible, padId, name, bpm, waveform, edit
             <Pressable style={styles.tBtn} onPress={() => onSetBpm((bpm || 120) + 1)}><Text style={styles.tBtnTxt}>+</Text></Pressable>
             <Pressable style={styles.tBtn} onPress={() => onSetBpm(dbl(bpm))}><Text style={styles.tBtnTxt}>×2</Text></Pressable>
           </View>
+          </ScrollView>
         </Pressable>
       </Pressable>
     </Modal>
@@ -166,8 +171,9 @@ const half = (b) => Math.max(20, Math.round((b || 120) / 2 * 10) / 10);
 const dbl = (b) => Math.min(300, Math.round((b || 120) * 2 * 10) / 10);
 
 const styles = StyleSheet.create({
-  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center' },
-  card: { maxWidth: 920, backgroundColor: theme.bgElevated, borderRadius: 16, padding: 16, borderWidth: 1, borderColor: theme.border },
+  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.7)', alignItems: 'center', justifyContent: 'center', padding: 16 },
+  card: { maxWidth: 820, backgroundColor: theme.bgElevated, borderRadius: 16, borderWidth: 1, borderColor: theme.border, overflow: 'hidden' },
+  scroll: { padding: 16 },
   header: { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 12 },
   play: { width: 46, height: 40, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.surfaceActive },
   playActive: { backgroundColor: theme.good },
