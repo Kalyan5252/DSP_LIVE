@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Modal, View, Text, Pressable, TextInput, ScrollView, StyleSheet, Animated, Dimensions, SafeAreaView, Keyboard, InputAccessoryView, Platform } from 'react-native';
+import { View, Text, Pressable, TextInput, ScrollView, StyleSheet, Animated, Dimensions, SafeAreaView, Keyboard, InputAccessoryView, Platform } from 'react-native';
 
 const KB_ACCESSORY = 'lt-kb-done';
 import { theme } from '../theme';
@@ -10,30 +10,46 @@ import {
 
 // The global library, as a right-side drawer (~half the app width) that respects
 // the safe area — it slides in from the right rather than covering the screen.
-export default function LibraryBrowser({ visible, library, mode, onClose, onChangeLibrary, onPick, onImport }) {
+export default function LibraryBrowser({ visible, library, missing, mode, onClose, onChangeLibrary, onPick, onImport }) {
   const [folderId, setFolderId] = useState(null);
   const [editing, setEditing] = useState(null);
   const [draft, setDraft] = useState({ name: '', color: LIB_COLORS[0], tags: '', bpm: '' });
+  // `show` keeps the drawer in the tree while it animates OUT after visible=false.
+  const [show, setShow] = useState(false);
 
   const panelW = Math.max(320, Math.min(560, Dimensions.get('window').width * 0.55));
-  const tx = useRef(new Animated.Value(panelW)).current;   // panel slide
+  const tx = useRef(new Animated.Value(panelW)).current;   // panel slide (starts off-screen)
   const bd = useRef(new Animated.Value(0)).current;        // backdrop fade (0..1)
+  const showRef = useRef(false);
+
   useEffect(() => {
     if (visible) {
+      // Mount, reset to a fresh view, and PARK off-screen synchronously so the
+      // very first painted frame is off-screen; then slide in on the next frame.
       setFolderId(null); setEditing(null);
-      // tx is parked off-screen (reset on close / init), so the first paint is
-      // off-screen; then the dark backdrop fades in as the panel slides in.
-      Animated.parallel([
-        Animated.timing(tx, { toValue: 0, duration: 240, useNativeDriver: true }),
-        Animated.timing(bd, { toValue: 1, duration: 240, useNativeDriver: true }),
-      ]).start();
-    } else {
-      // Park off-screen the moment it closes, so the NEXT open never flashes
-      // on-screen for a frame before the slide-in starts.
-      tx.setValue(panelW);
-      bd.setValue(0);
+      tx.setValue(panelW); bd.setValue(0);
+      showRef.current = true; setShow(true);
+      const raf = requestAnimationFrame(() => {
+        Animated.parallel([
+          Animated.timing(tx, { toValue: 0, duration: 240, useNativeDriver: true }),
+          Animated.timing(bd, { toValue: 1, duration: 240, useNativeDriver: true }),
+        ]).start();
+      });
+      return () => cancelAnimationFrame(raf);
     }
+    // visible=false: slide out, then unmount.
+    if (showRef.current) {
+      Animated.parallel([
+        Animated.timing(tx, { toValue: panelW, duration: 200, useNativeDriver: true }),
+        Animated.timing(bd, { toValue: 0, duration: 200, useNativeDriver: true }),
+      ]).start(({ finished }) => {
+        if (finished) { showRef.current = false; setShow(false); }
+      });
+    }
+    return undefined;
   }, [visible, panelW, tx, bd]);
+
+  if (!show) return null;
 
   const { folders, files } = childrenOf(library, folderId);
   const crumbs = pathTo(library, folderId);
@@ -67,13 +83,7 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
   };
 
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="none"
-      supportedOrientations={['landscape', 'landscape-left', 'landscape-right', 'portrait']}
-      onRequestClose={onClose}
-    >
+    <View style={styles.overlay} pointerEvents="box-none">
       <View style={styles.root}>
         <Animated.View style={[styles.backdrop, { opacity: bd }]}>
           <Pressable style={styles.backdropPress} onPress={onClose} />
@@ -113,17 +123,20 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
                 </Pressable>
               ))}
 
-              {files.map((f) => (
-                <Pressable key={f.id} style={styles.row} onPress={() => (mode === 'pick' ? onPick(f) : openEditor('file', f))} onLongPress={() => openEditor('file', f)}>
-                  <View style={[styles.chip, { backgroundColor: f.color }]} />
-                  <Text style={styles.rowName} numberOfLines={1}>{f.name}</Text>
-                  {f.bpm ? <Text style={styles.bpm}>{f.bpm} BPM</Text> : null}
-                  {f.tags && f.tags.length ? (
+              {files.map((f) => {
+                const gone = missing && missing[f.id];
+                return (
+                <Pressable key={f.id} style={[styles.row, gone && styles.rowGone]} onPress={() => (mode === 'pick' ? onPick(f) : openEditor('file', f))} onLongPress={() => openEditor('file', f)}>
+                  <View style={[styles.chip, { backgroundColor: gone ? theme.textFaint : f.color }]} />
+                  <Text style={[styles.rowName, gone && { color: theme.textDim }]} numberOfLines={1}>{f.name}</Text>
+                  {gone ? <Text style={styles.missing}>MISSING</Text> : (f.bpm ? <Text style={styles.bpm}>{f.bpm} BPM</Text> : null)}
+                  {!gone && f.tags && f.tags.length ? (
                     <View style={styles.tags}>{f.tags.slice(0, 2).map((t) => <Text key={t} style={styles.tag}>{t}</Text>)}</View>
                   ) : null}
-                  {mode === 'pick' ? <Text style={styles.use}>Use</Text> : <Chevron size={12} color={theme.textFaint} />}
+                  {mode === 'pick' ? <Text style={[styles.use, gone && { color: theme.textFaint }]}>Use</Text> : <Chevron size={12} color={theme.textFaint} />}
                 </Pressable>
-              ))}
+                );
+              })}
             </ScrollView>
 
             <Text style={styles.hint}>
@@ -170,11 +183,12 @@ export default function LibraryBrowser({ visible, library, mode, onClose, onChan
           </InputAccessoryView>
         ) : null}
       </View>
-    </Modal>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  overlay: { ...StyleSheet.absoluteFillObject, zIndex: 100, elevation: 100 },
   root: { flex: 1 },
   backdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.6)' },
   backdropPress: { flex: 1 },
@@ -196,6 +210,8 @@ const styles = StyleSheet.create({
   listContent: { paddingBottom: 8, gap: 6 },
   empty: { color: theme.textFaint, fontSize: 13, textAlign: 'center', paddingVertical: 28 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: theme.surface, borderWidth: 1, borderColor: theme.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 11 },
+  rowGone: { opacity: 0.7, borderColor: theme.danger, borderStyle: 'dashed' },
+  missing: { color: theme.danger, fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
   chip: { width: 9, height: 22, borderRadius: 3 },
   rowName: { flex: 1, color: theme.text, fontSize: 14, fontWeight: '600' },
   bpm: { color: theme.good, fontSize: 11, fontWeight: '800', fontVariant: ['tabular-nums'] },

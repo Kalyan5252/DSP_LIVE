@@ -8,8 +8,8 @@ import syncStore from '../audio/syncStore';
 // The beat dot reads the native transport directly (via syncStore), so it stays
 // sample-accurate without re-rendering the rest of the app.
 export default function TransportBar({
-  bpm, num, den, playing, quantizeLabel, quantizeActive,
-  onTogglePlay, onOpenTempo, onOpenSignature, onOpenQuantize,
+  projectName, bpm, num, den, playing, quantizeLabel, quantizeActive,
+  onHome, onTogglePlay, onOpenTempo, onOpenSignature, onOpenQuantize,
 }) {
   const [beat, setBeat] = useState({ playing: false, beatInBar: 0 });
   useEffect(() => {
@@ -22,9 +22,9 @@ export default function TransportBar({
 
   return (
     <View style={styles.bar}>
-      <Pressable style={styles.iconBtn}><Home size={20} color={theme.text} /></Pressable>
+      <Pressable style={styles.iconBtn} onPress={onHome}><Home size={20} color={theme.text} /></Pressable>
       <View style={styles.project}>
-        <Text style={styles.projectText} numberOfLines={1}>Live Trax</Text>
+        <Text style={styles.projectText} numberOfLines={1}>{projectName || 'Live Trax'}</Text>
       </View>
       <Pressable style={styles.chevBtn}><Chevron size={12} color={theme.textDim} /></Pressable>
 

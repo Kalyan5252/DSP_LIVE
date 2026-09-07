@@ -8,8 +8,11 @@ import { theme } from './src/theme';
 import { padId, quantizeLabel } from './src/config';
 import engine from './src/audio/engine';
 import syncStore from './src/audio/syncStore';
-import { importSampleFile, deleteSampleFile } from './src/storage/store';
+import { importSampleFile, deleteSampleFile, resolveSampleUri, sampleRelPath, sampleExists } from './src/storage/store';
 import { emptyLibrary, addFile } from './src/storage/library';
+import {
+  emptyProjects, createProject, updateProject, renameProject, deleteProject, getProject,
+} from './src/storage/projects';
 import TransportBar from './src/components/TransportBar';
 import InstrumentGrid from './src/components/InstrumentGrid';
 import RightRail from './src/components/RightRail';
@@ -17,102 +20,221 @@ import SignaturePicker from './src/components/SignaturePicker';
 import TempoDial from './src/components/TempoDial';
 import QuantizePicker from './src/components/QuantizePicker';
 import LibraryBrowser from './src/components/LibraryBrowser';
+import ProjectHome from './src/components/ProjectHome';
 
-const STORE_KEY = 'livetrax.board.v1';
+const OLD_BOARD_KEY = 'livetrax.board.v1';
+const PROJECTS_KEY = 'livetrax.projects.v1';
 const LIB_KEY = 'livetrax.library.v1';
 
+// One-time normalization: rewrite any legacy ABSOLUTE sample uris to stable
+// app-relative refs ("samples/<file>"), so they resolve against the current
+// document directory after every rebuild.
+function migrateLibraryUris(lib) {
+  if (!lib || !lib.files) return { lib, changed: false };
+  let changed = false;
+  const files = {};
+  for (const id of Object.keys(lib.files)) {
+    const f = lib.files[id];
+    const rel = sampleRelPath(f.uri);
+    if (rel !== f.uri) changed = true;
+    files[id] = { ...f, uri: rel };
+  }
+  return { lib: changed ? { ...lib, files } : lib, changed };
+}
+function migrateProjectUris(projects) {
+  if (!projects || !projects.byId) return { projects, changed: false };
+  let changed = false;
+  const byId = {};
+  for (const id of Object.keys(projects.byId)) {
+    const p = projects.byId[id];
+    const pads = {};
+    for (const pid of Object.keys(p.pads || {})) {
+      const pd = p.pads[pid];
+      const rel = sampleRelPath(pd.uri);
+      if (rel !== pd.uri) changed = true;
+      pads[pid] = { ...pd, uri: rel };
+    }
+    byId[id] = { ...p, pads };
+  }
+  return { projects: changed ? { ...projects, byId } : projects, changed };
+}
+
 export default function App() {
+  const [projects, setProjects] = useState(emptyProjects());
+  const [currentId, setCurrentId] = useState(null); // null = Home
+
+  // Working state for the OPEN project (mirrors projects.byId[currentId]).
   const [pads, setPads] = useState({});
   const [bpm, setBpm] = useState(120);
   const [sig, setSig] = useState({ num: 4, den: 4 });
-  const [quantizeBeats, setQuantizeBeats] = useState(4); // master-beats per transition
+  const [quantizeBeats, setQuantizeBeats] = useState(4);
   const [qOpen, setQOpen] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(1);
   const [sigOpen, setSigOpen] = useState(false);
   const [tempoOpen, setTempoOpen] = useState(false);
 
+  // Global, shared across all projects.
   const [library, setLibrary] = useState(emptyLibrary());
   const [libOpen, setLibOpen] = useState(false);
   const [libMode, setLibMode] = useState('manage');
+  const [missing, setMissing] = useState({}); // library fileId -> true when file is gone
   const pickTargetRef = useRef(null);
 
-  const padsRef = useRef({});
+  const padsRef = useRef({}); padsRef.current = pads;
   const volumeRef = useRef(1);
   const volApplyRef = useRef(0);
-  padsRef.current = pads;
+  const currentIdRef = useRef(null); currentIdRef.current = currentId;
+  const projectsRef = useRef(projects); projectsRef.current = projects;
+  const openingRef = useRef(false); // suppress settings-persist while opening
 
+  // ---- projects persistence ----
+  const saveProjects = useCallback((next) => {
+    projectsRef.current = next;
+    setProjects(next);
+    AsyncStorage.setItem(PROJECTS_KEY, JSON.stringify(next)).catch(() => {});
+  }, []);
+  const writeCurrent = useCallback((patch) => {
+    const id = currentIdRef.current;
+    if (!id || !projectsRef.current.byId[id]) return;
+    saveProjects(updateProject(projectsRef.current, id, patch));
+  }, [saveProjects]);
+  const persistPads = useCallback((nextPads) => { writeCurrent({ pads: nextPads }); }, [writeCurrent]);
+
+  // Flag library files whose audio is missing on disk (e.g. lost in a prior
+  // container reset) so the user can spot and re-import them.
+  const refreshMissing = useCallback(async (lib) => {
+    const files = Object.values((lib && lib.files) || {});
+    const next = {};
+    for (const f of files) {
+      // eslint-disable-next-line no-await-in-loop
+      const ok = await sampleExists(f.uri);
+      if (!ok) next[f.id] = true;
+    }
+    setMissing(next);
+  }, []);
+
+  // ---- boot: load library + projects (migrate a legacy single board) ----
   useEffect(() => {
     let mounted = true;
     engine.configure();
+    engine.setMasterSignature(4, 4);
+    engine.setQuantize(4);
     (async () => {
       try {
-        const raw = await AsyncStorage.getItem(STORE_KEY);
-        if (raw && mounted) {
-          const saved = JSON.parse(raw);
-          if (saved.bpm) { setBpm(saved.bpm); engine.setMasterTempo(saved.bpm); }
-          if (saved.sig) { setSig(saved.sig); engine.setMasterSignature(saved.sig.num, saved.sig.den); }
-          if (typeof saved.volume === 'number') { setVolume(saved.volume); volumeRef.current = saved.volume; }
-          engine.setMasterVolume(volumeRef.current);
-          engine.setQuantize(typeof saved.quantizeBeats === 'number' ? saved.quantizeBeats : 4);
-          if (typeof saved.quantizeBeats === 'number') setQuantizeBeats(saved.quantizeBeats);
-          if (saved.pads) {
-            setPads(saved.pads);
-            for (const id of Object.keys(saved.pads)) {
-              const p = saved.pads[id];
-              if (p?.uri) {
-                const dur = await engine.load(id, p.uri, { bpm: p.bpm || saved.bpm, loop: true });
-                saved.pads[id] = { ...p, durationSec: dur };
-              }
-            }
-            if (mounted) setPads({ ...saved.pads });
-          }
-        } else {
-          engine.setMasterSignature(4, 4);
-          engine.setQuantize(4);
-        }
         const rawLib = await AsyncStorage.getItem(LIB_KEY);
         if (rawLib && mounted) {
-          const lib = JSON.parse(rawLib);
-          if (lib && lib.folders && lib.files) setLibrary(lib);
+          const parsedLib = JSON.parse(rawLib);
+          if (parsedLib && parsedLib.folders && parsedLib.files) {
+            const { lib, changed } = migrateLibraryUris(parsedLib);
+            setLibrary(lib);
+            if (changed) AsyncStorage.setItem(LIB_KEY, JSON.stringify(lib)).catch(() => {});
+            refreshMissing(lib);
+          }
+        }
+        const rawPrj = await AsyncStorage.getItem(PROJECTS_KEY);
+        if (rawPrj) {
+          const parsed = JSON.parse(rawPrj);
+          if (parsed && parsed.order && parsed.byId && mounted) {
+            const { projects: mig } = migrateProjectUris(parsed);
+            saveProjects(mig);
+            return;
+          }
+        }
+        const rawOld = await AsyncStorage.getItem(OLD_BOARD_KEY);
+        if (rawOld && mounted) {
+          const b = JSON.parse(rawOld);
+          const seed = {
+            pads: b.pads || {},
+            bpm: b.bpm || 120,
+            sig: b.sig || { num: 4, den: 4 },
+            quantizeBeats: typeof b.quantizeBeats === 'number' ? b.quantizeBeats : 4,
+            volume: typeof b.volume === 'number' ? b.volume : 1,
+          };
+          const { projects: np } = createProject(emptyProjects(), 'My Project', seed);
+          saveProjects(np);
         }
       } catch (e) { /* fresh */ }
     })();
 
-    syncStore.start(); // begin polling the native transport for the UI
-
+    syncStore.start();
     return () => {
       mounted = false;
       syncStore.stop();
       engine.disposeClock();
       engine.unloadAll();
     };
-  }, []);
+  }, [saveProjects, refreshMissing]);
 
-  useEffect(() => {
-    engine.setMasterTempo(bpm);
-  }, [bpm]);
-  useEffect(() => {
-    engine.setMasterSignature(sig.num, sig.den);
-  }, [sig]);
-  useEffect(() => { engine.setQuantize(quantizeBeats); }, [quantizeBeats]);
+  // Apply engine settings live while a project is open.
+  useEffect(() => { if (currentId) engine.setMasterTempo(bpm); }, [bpm, currentId]);
+  useEffect(() => { if (currentId) engine.setMasterSignature(sig.num, sig.den); }, [sig, currentId]);
+  useEffect(() => { if (currentId) engine.setQuantize(quantizeBeats); }, [quantizeBeats, currentId]);
 
-  // Debounced persistence of settings (tempo/signature/volume).
+  // Persist settings into the current project (debounced).
   useEffect(() => {
+    if (!currentId || openingRef.current) return undefined;
     const t = setTimeout(() => {
       engine.setMasterVolume(volume);
-      AsyncStorage.setItem(STORE_KEY, JSON.stringify({ pads: padsRef.current, bpm, sig, volume, quantizeBeats })).catch(() => {});
-    }, 500);
+      writeCurrent({ bpm, sig, volume, quantizeBeats });
+    }, 400);
     return () => clearTimeout(t);
-  }, [bpm, sig, volume, quantizeBeats]);
+  }, [bpm, sig, volume, quantizeBeats, currentId, writeCurrent]);
 
-  const persist = useCallback((nextPads) => {
-    AsyncStorage.setItem(STORE_KEY, JSON.stringify({ pads: nextPads, bpm, sig, volume: volumeRef.current })).catch(() => {});
-  }, [bpm, sig]);
+  // ---- open / close projects ----
+  const openProject = useCallback(async (id) => {
+    const p = getProject(projectsRef.current, id);
+    if (!p) return;
+    openingRef.current = true;
+    engine.stopClock(); engine.stopAll(); engine.unloadAll();
+    syncStore.reset();
+    setIsPlaying(false);
 
+    setBpm(p.bpm); setSig(p.sig); setQuantizeBeats(p.quantizeBeats);
+    setVolume(p.volume); volumeRef.current = p.volume;
+    engine.setMasterTempo(p.bpm);
+    engine.setMasterSignature(p.sig.num, p.sig.den);
+    engine.setQuantize(p.quantizeBeats);
+    engine.setMasterVolume(p.volume);
+
+    const padsCopy = { ...(p.pads || {}) };
+    setPads(padsCopy);
+    setCurrentId(id);
+
+    for (const pid of Object.keys(padsCopy)) {
+      const pd = padsCopy[pid];
+      if (pd && pd.uri) {
+        const dur = await engine.load(pid, resolveSampleUri(pd.uri), { bpm: pd.bpm || p.bpm, loop: true });
+        padsCopy[pid] = { ...pd, durationSec: dur };
+      }
+    }
+    setPads({ ...padsCopy });
+    setTimeout(() => { openingRef.current = false; }, 500);
+  }, []);
+
+  const goHome = useCallback(() => {
+    if (currentIdRef.current) {
+      saveProjects(updateProject(projectsRef.current, currentIdRef.current, {
+        pads: padsRef.current, bpm, sig, volume: volumeRef.current, quantizeBeats,
+      }));
+    }
+    engine.stopClock(); engine.stopAll(); engine.unloadAll();
+    syncStore.reset();
+    setIsPlaying(false);
+    setCurrentId(null);
+  }, [bpm, sig, quantizeBeats, saveProjects]);
+
+  const onCreateProject = useCallback((name) => {
+    const { projects: np, id } = createProject(projectsRef.current, name);
+    saveProjects(np);
+    openProject(id);
+  }, [saveProjects, openProject]);
+  const onRenameProject = useCallback((id, name) => { saveProjects(renameProject(projectsRef.current, id, name)); }, [saveProjects]);
+  const onDeleteProject = useCallback((id) => { saveProjects(deleteProject(projectsRef.current, id)); }, [saveProjects]);
+
+  // ---- volume / library / pads ----
   const onVolume = useCallback((v) => {
-    volumeRef.current = v;
-    setVolume(v);
+    volumeRef.current = v; setVolume(v);
     const now = Date.now();
     if (now - volApplyRef.current > 60) { volApplyRef.current = now; engine.setMasterVolume(v); }
   }, []);
@@ -121,9 +243,8 @@ export default function App() {
     setLibrary(next);
     AsyncStorage.setItem(LIB_KEY, JSON.stringify(next)).catch(() => {});
     if (opts && opts.uris) opts.uris.forEach((u) => deleteSampleFile(u));
-
-    // Keep board pads in sync with library edits: if a file's BPM changed, every
-    // pad using that file re-slices (ring) and re-locks its stretch (audio), live.
+    refreshMissing(next);
+    // Reconcile the open board's pads with library BPM edits (re-slice + re-lock).
     const byUri = {};
     Object.values(next.files || {}).forEach((f) => { byUri[f.uri] = f; });
     setPads((prev) => {
@@ -139,10 +260,10 @@ export default function App() {
         }
       }
       if (!changed) return prev;
-      persist(out);
+      persistPads(out);
       return out;
     });
-  }, [persist]);
+  }, [persistPads, refreshMissing]);
 
   const onImport = useCallback(async (folderId) => {
     try {
@@ -151,10 +272,8 @@ export default function App() {
       const asset = res.assets[0];
       const uri = await importSampleFile(asset.uri, asset.name || 'loop');
       const name = (asset.name || 'Loop').replace(/\.[^.]+$/, '');
-      // Detect the loop's real BPM from the audio; fall back to the master tempo
-      // only if detection fails (the user can still correct it in the library).
       let detected = 0;
-      try { detected = engine.estimateBpm(uri); } catch (e) { detected = 0; }
+      try { detected = engine.estimateBpm(resolveSampleUri(uri)); } catch (e) { detected = 0; }
       const loopBpm = detected > 0 ? detected : bpm;
       const { lib } = addFile(library, { name, uri, bpm: loopBpm }, folderId);
       onChangeLibrary(lib);
@@ -166,21 +285,18 @@ export default function App() {
     if (!target) return;
     const id = padId(target.instKey, target.rowIndex);
     const loopBpm = file.bpm || bpm;
-    setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name, bpm: file.bpm || null } }; persist(next); return next; });
-    engine.load(id, file.uri, { bpm: loopBpm, loop: true }).then((dur) => {
+    setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name, bpm: file.bpm || null } }; persistPads(next); return next; });
+    engine.load(id, resolveSampleUri(file.uri), { bpm: loopBpm, loop: true }).then((dur) => {
       setPads((prev) => {
         if (!prev[id]) return prev;
         const next = { ...prev, [id]: { ...prev[id], durationSec: dur } };
-        persist(next);
+        persistPads(next);
         return next;
       });
     });
     setLibOpen(false);
-  }, [persist, bpm]);
+  }, [persistPads, bpm]);
 
-  // Tap a pad: column-exclusive, quantized launch. Native schedules the launch
-  // (and the outgoing loop's stop) on the same grid boundary, so switching a
-  // column's loop is seamless and on-beat.
   const onPadPress = useCallback((inst, rowIndex) => {
     const id = padId(inst.key, rowIndex);
     if (!padsRef.current[id]?.uri) {
@@ -191,13 +307,11 @@ export default function App() {
     const col = syncStore.getColumnActive()[inst.key];
     const activeRow = col ? col.row : null;
     if (activeRow === rowIndex) {
-      engine.stop(id); // finishes to the next boundary
+      engine.stop(id);
     } else {
-      // Start the new loop FIRST so it phase-locks to the still-playing outgoing
-      // loop (continues from the same position), then stop the old one.
       engine.trigger(id);
       if (activeRow != null) engine.stop(padId(inst.key, activeRow));
-      syncStore.markArmed(id); // optimistic: pulse immediately
+      syncStore.markArmed(id);
     }
   }, []);
 
@@ -210,8 +324,8 @@ export default function App() {
     }
     engine.unload(id);
     syncStore.markStopped(id);
-    setPads((prev) => { const next = { ...prev }; delete next[id]; persist(next); return next; });
-  }, [persist]);
+    setPads((prev) => { const next = { ...prev }; delete next[id]; persistPads(next); return next; });
+  }, [persistPads]);
 
   const onTogglePlay = useCallback(() => {
     if (engine.isClockPlaying()) { engine.stopClock(); setIsPlaying(false); }
@@ -221,12 +335,33 @@ export default function App() {
   const onStopAll = useCallback(() => { engine.stopAll(); }, []);
   const openLibraryManage = useCallback(() => { pickTargetRef.current = null; setLibMode('manage'); setLibOpen(true); }, []);
 
+  // ---- Home screen ----
+  if (!currentId) {
+    return (
+      <SafeAreaView style={styles.safe}>
+        <StatusBar style="light" hidden />
+        <ProjectHome
+          projects={projects}
+          onOpen={openProject}
+          onCreate={onCreateProject}
+          onRename={onRenameProject}
+          onDelete={onDeleteProject}
+        />
+      </SafeAreaView>
+    );
+  }
+
+  const projName = (getProject(projects, currentId) || {}).name || 'Live Trax';
+
+  // ---- Project (board) screen ----
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar style="light" hidden />
       <TransportBar
+        projectName={projName}
         bpm={bpm} num={sig.num} den={sig.den}
         playing={isPlaying} quantizeLabel={quantizeLabel(quantizeBeats)} quantizeActive={quantizeBeats > 0}
+        onHome={goHome}
         onTogglePlay={onTogglePlay}
         onOpenTempo={() => setTempoOpen(true)}
         onOpenSignature={() => setSigOpen(true)}
@@ -243,7 +378,7 @@ export default function App() {
       <SignaturePicker visible={sigOpen} num={sig.num} den={sig.den} onClose={() => setSigOpen(false)} onSelect={(num, den) => { setSig({ num, den }); setSigOpen(false); }} />
       <TempoDial visible={tempoOpen} bpm={bpm} onClose={() => setTempoOpen(false)} onChange={(v) => setBpm(Math.max(20, Math.min(300, Math.round(v))))} />
       <QuantizePicker visible={qOpen} value={quantizeBeats} onClose={() => setQOpen(false)} onSelect={(b) => { setQuantizeBeats(b); setQOpen(false); }} />
-      <LibraryBrowser visible={libOpen} library={library} mode={libMode} onClose={() => setLibOpen(false)} onChangeLibrary={onChangeLibrary} onPick={onPickFile} onImport={onImport} />
+      <LibraryBrowser visible={libOpen} library={library} missing={missing} mode={libMode} onClose={() => setLibOpen(false)} onChangeLibrary={onChangeLibrary} onPick={onPickFile} onImport={onImport} />
     </SafeAreaView>
   );
 }
