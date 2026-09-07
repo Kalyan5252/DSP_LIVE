@@ -5,7 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as DocumentPicker from 'expo-document-picker';
 
 import { theme } from './src/theme';
-import { padId, quantizeLabel } from './src/config';
+import { padId, quantizeLabel, INSTRUMENTS, ROWS } from './src/config';
 import engine from './src/audio/engine';
 import syncStore from './src/audio/syncStore';
 import { importSampleFile, deleteSampleFile, resolveSampleUri, sampleRelPath, sampleExists } from './src/storage/store';
@@ -22,6 +22,7 @@ import QuantizePicker from './src/components/QuantizePicker';
 import LibraryBrowser from './src/components/LibraryBrowser';
 import ProjectHome from './src/components/ProjectHome';
 import SampleEditor, { DEFAULT_EDIT } from './src/components/SampleEditor';
+import Mixer from './src/components/Mixer';
 
 const OLD_BOARD_KEY = 'livetrax.board.v1';
 const PROJECTS_KEY = 'livetrax.projects.v1';
@@ -60,6 +61,8 @@ function migrateProjectUris(projects) {
   return { projects: changed ? { ...projects, byId } : projects, changed };
 }
 
+function defaultMixer() { return { vol: {}, solo: {}, mute: {} }; }
+
 export default function App() {
   const [projects, setProjects] = useState(emptyProjects());
   const [currentId, setCurrentId] = useState(null); // null = Home
@@ -83,7 +86,10 @@ export default function App() {
   const [editMode, setEditMode] = useState(false);       // Edit (pencil) armed on the rail
   const [editorPadId, setEditorPadId] = useState(null);  // pad open in the sample editor
   const [waveform, setWaveform] = useState([]);
+  const [mixer, setMixer] = useState(defaultMixer());
+  const [mixerOpen, setMixerOpen] = useState(false);
   const pickTargetRef = useRef(null);
+  const mixerRef = useRef(defaultMixer()); mixerRef.current = mixer;
   const editModeRef = useRef(false); editModeRef.current = editMode;
   const editorPadIdRef = useRef(null); editorPadIdRef.current = editorPadId;
 
@@ -119,6 +125,27 @@ export default function App() {
     setWaveform(engine.getWaveform(id, 240));
     setEditorPadId(id);
   }, []);
+
+  // Apply the mixer (channel volume + solo/mute) to every pad's channel gain.
+  const applyMixer = useCallback((mx) => {
+    const anySolo = Object.values(mx.solo || {}).some(Boolean);
+    INSTRUMENTS.forEach((inst) => {
+      let eff;
+      if (anySolo && !mx.solo[inst.key]) eff = 0;
+      else if (mx.mute[inst.key]) eff = 0;
+      else eff = typeof mx.vol[inst.key] === 'number' ? mx.vol[inst.key] : 1;
+      ROWS.forEach((_, row) => engine.setPadChannelGain(padId(inst.key, row), eff));
+    });
+  }, []);
+  const updateMixer = useCallback((next) => {
+    mixerRef.current = next;
+    setMixer(next);
+    applyMixer(next);
+    writeCurrent({ mixer: next });
+  }, [applyMixer, writeCurrent]);
+  const onMixerVol = useCallback((key, v) => { const mx = mixerRef.current; updateMixer({ ...mx, vol: { ...mx.vol, [key]: v } }); }, [updateMixer]);
+  const onToggleSolo = useCallback((key) => { const mx = mixerRef.current; updateMixer({ ...mx, solo: { ...mx.solo, [key]: !mx.solo[key] } }); }, [updateMixer]);
+  const onToggleMute = useCallback((key) => { const mx = mixerRef.current; updateMixer({ ...mx, mute: { ...mx.mute, [key]: !mx.mute[key] } }); }, [updateMixer]);
 
   const onEditorChange = useCallback((patch) => {
     const id = editorPadIdRef.current; if (!id) return;
@@ -244,6 +271,8 @@ export default function App() {
     engine.setQuantize(p.quantizeBeats);
     engine.setMasterVolume(p.volume);
 
+    const mx = p.mixer || defaultMixer();
+    mixerRef.current = mx; setMixer(mx);
     const padsCopy = { ...(p.pads || {}) };
     setPads(padsCopy);
     setCurrentId(id);
@@ -261,13 +290,14 @@ export default function App() {
       }
     }
     setPads({ ...padsCopy });
+    applyMixer(mx);
     setTimeout(() => { openingRef.current = false; }, 500);
   }, []);
 
   const goHome = useCallback(() => {
     if (currentIdRef.current) {
       saveProjects(updateProject(projectsRef.current, currentIdRef.current, {
-        pads: padsRef.current, bpm, sig, volume: volumeRef.current, quantizeBeats,
+        pads: padsRef.current, bpm, sig, volume: volumeRef.current, quantizeBeats, mixer: mixerRef.current,
       }));
     }
     engine.stopClock(); engine.stopAll(); engine.unloadAll();
@@ -427,7 +457,7 @@ export default function App() {
         <View style={styles.gridWrap}>
           <InstrumentGrid pads={pads} den={sig.den} onPadPress={onPadPress} onPadLong={onPadLong} />
         </View>
-        <RightRail onStopAll={onStopAll} onOpenLibrary={openLibraryManage} volume={volume} onVolume={onVolume} />
+        <RightRail onStopAll={onStopAll} onOpenLibrary={openLibraryManage} onOpenMixer={() => setMixerOpen(true)} volume={volume} onVolume={onVolume} />
       </View>
 
       <SignaturePicker visible={sigOpen} num={sig.num} den={sig.den} onClose={() => setSigOpen(false)} onSelect={(num, den) => { setSig({ num, den }); setSigOpen(false); }} />
@@ -448,6 +478,7 @@ export default function App() {
           onClose={onCloseEditor}
         />
       ) : null}
+      <Mixer visible={mixerOpen} mixer={mixer} onVol={onMixerVol} onToggleSolo={onToggleSolo} onToggleMute={onToggleMute} onClose={() => setMixerOpen(false)} />
     </SafeAreaView>
   );
 }

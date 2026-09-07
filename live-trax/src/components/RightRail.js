@@ -7,11 +7,11 @@ import Slider from './Slider';
 // Right icon rail. The fader at the top is the MASTER VOLUME (a smooth Animated
 // slider so dragging stays glitch-free while audio plays). Edit arms the sample
 // editor; the folder opens the library.
-function RightRail({ onOpenLibrary, volume, onVolume }) {
+function RightRail({ onOpenLibrary, onOpenMixer, volume, onVolume }) {
   return (
     <View style={styles.rail}>
       <Slider vertical value={volume} min={0} max={1} pad={14} onChange={onVolume} style={styles.fader} />
-      <View style={styles.btn}><Sliders size={18} color={theme.textDim} /></View>
+      <Pressable style={styles.btn} onPress={onOpenMixer}><Sliders size={18} color={theme.text} /></Pressable>
       <View style={styles.btn}><Fx size={16} color={theme.textDim} /></View>
       <Pressable style={styles.btn} onPress={onOpenLibrary}><Folder size={18} color={theme.text} /></Pressable>
     </View>
