@@ -8,8 +8,8 @@ import Slider from './Slider';
 
 export const DEFAULT_EDIT = { gain: 1, startFrac: 0, endFrac: 1, fadeInMs: 0, fadeOutMs: 0, playMode: 0 };
 const MODES = [{ m: 0, label: 'Loop' }, { m: 1, label: 'One shot' }, { m: 2, label: 'Gate' }];
-const H = 150;
-const LANE = 30; // grip lane above the spectrum
+const H = 160;
+const VPAD = 22; // vertical padding inside the spectrum so grips fit at top/bottom
 
 // On-screen sample editor (centered modal, like the tempo dial). Waveform with
 // draggable start/end trim, play mode, gain, fades, and tempo. The waveform path
@@ -46,7 +46,7 @@ export default function SampleEditor({ visible, padId, name, bpm, waveform, edit
     return syncStore.subscribePad(padId, apply);
   }, [visible, padId]);
 
-  const wavePath = useMemo(() => (waveform && waveform.length ? buildWavePath(waveform, waveW, H) : ''), [waveform, waveW]);
+  const wavePath = useMemo(() => (waveform && waveform.length ? buildWavePath(waveform, waveW, H, VPAD) : ''), [waveform, waveW]);
 
   const sx = region.startFrac * waveW;
   const ex = region.endFrac * waveW;
@@ -79,22 +79,20 @@ export default function SampleEditor({ visible, padId, name, bpm, waveform, edit
             <Pressable style={styles.close} onPress={onClose}><Text style={styles.closeTxt}>✕</Text></Pressable>
           </View>
 
-          <View style={[styles.wave, { height: H + LANE }]}>
-            <View style={[styles.spectrum, { height: H }]}>
-              <Svg width={waveW} height={H}>
-                {wavePath ? <Path d={wavePath} fill={theme.danger} opacity={0.9} /> : null}
-                <Rect x={0} y={0} width={sx} height={H} fill="rgba(8,6,7,0.66)" />
-                <Rect x={ex} y={0} width={Math.max(0, waveW - ex)} height={H} fill="rgba(8,6,7,0.66)" />
-              </Svg>
-              <Playhead padId={padId} startFrac={region.startFrac} endFrac={region.endFrac} width={waveW} height={H} />
-            </View>
+          <View style={[styles.wave, { height: H }]}>
+            <Svg width={waveW} height={H}>
+              {wavePath ? <Path d={wavePath} fill={theme.danger} opacity={0.9} /> : null}
+              <Rect x={0} y={0} width={sx} height={H} fill="rgba(8,6,7,0.6)" />
+              <Rect x={ex} y={0} width={Math.max(0, waveW - ex)} height={H} fill="rgba(8,6,7,0.6)" />
+            </Svg>
+            <Playhead padId={padId} startFrac={region.startFrac} endFrac={region.endFrac} width={waveW} height={H} />
             <View style={[styles.handle, { left: sx - 18 }]} {...startPan.current.panHandlers}>
               <View style={styles.hLine} />
-              <View style={styles.grip}><View style={styles.gripBar} /><View style={styles.gripBar} /></View>
+              <View style={[styles.grip, styles.gripTop]}><View style={styles.gripBar} /><View style={styles.gripBar} /></View>
             </View>
             <View style={[styles.handle, { left: ex - 18 }]} {...endPan.current.panHandlers}>
               <View style={styles.hLine} />
-              <View style={styles.grip}><View style={styles.gripBar} /><View style={styles.gripBar} /></View>
+              <View style={[styles.grip, styles.gripBottom]}><View style={styles.gripBar} /><View style={styles.gripBar} /></View>
             </View>
           </View>
 
@@ -160,14 +158,15 @@ function makeHandlePan(get, width, draggingRef, set) {
   return obj;
 }
 
-function buildWavePath(peaks, W, H2) {
+function buildWavePath(peaks, W, H2, vpad = 0) {
   const n = peaks.length;
   const mid = H2 / 2;
+  const amp = H2 / 2 - vpad;
   const step = W / n;
   let top = `M 0 ${mid}`;
-  for (let i = 0; i < n; i++) { const x = i * step; const y = mid - peaks[i] * (H2 / 2) * 0.95; top += ` L ${x.toFixed(1)} ${y.toFixed(1)}`; }
+  for (let i = 0; i < n; i++) { const x = i * step; const y = mid - peaks[i] * amp; top += ` L ${x.toFixed(1)} ${y.toFixed(1)}`; }
   let bot = '';
-  for (let i = n - 1; i >= 0; i--) { const x = i * step; const y = mid + peaks[i] * (H2 / 2) * 0.95; bot += ` L ${x.toFixed(1)} ${y.toFixed(1)}`; }
+  for (let i = n - 1; i >= 0; i--) { const x = i * step; const y = mid + peaks[i] * amp; bot += ` L ${x.toFixed(1)} ${y.toFixed(1)}`; }
   return `${top}${bot} Z`;
 }
 
@@ -191,11 +190,12 @@ const styles = StyleSheet.create({
   closeTxt: { color: theme.textDim, fontSize: 15, fontWeight: '700' },
 
   wave: { borderRadius: 10, overflow: 'hidden', backgroundColor: '#120C0E', borderWidth: 1, borderColor: theme.border, marginBottom: 12 },
-  spectrum: { position: 'absolute', left: 0, right: 0, bottom: 0 },
   handle: { position: 'absolute', top: 0, bottom: 0, width: 36, alignItems: 'center' },
-  hLine: { position: 'absolute', top: LANE - 4, bottom: 0, width: 2, backgroundColor: '#fff' },
-  grip: { position: 'absolute', top: 3, width: 20, height: 24, borderRadius: 6, backgroundColor: '#fff', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3 },
-  gripBar: { width: 2, height: 11, borderRadius: 1, backgroundColor: 'rgba(10,10,14,0.5)' },
+  hLine: { position: 'absolute', top: 0, bottom: 0, width: 2, backgroundColor: '#fff' },
+  grip: { position: 'absolute', width: 20, height: 22, borderRadius: 6, backgroundColor: '#fff', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 3 },
+  gripTop: { top: 3 },
+  gripBottom: { bottom: 3 },
+  gripBar: { width: 2, height: 10, borderRadius: 1, backgroundColor: 'rgba(10,10,14,0.5)' },
 
   modes: { flexDirection: 'row', gap: 8, marginBottom: 12 },
   mode: { flex: 1, alignItems: 'center', paddingVertical: 11, borderRadius: 10, borderWidth: 1, borderColor: theme.border, backgroundColor: theme.surface },
