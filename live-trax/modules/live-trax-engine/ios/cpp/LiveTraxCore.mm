@@ -103,6 +103,31 @@ static ma_result voice_read(ma_data_source* ds, void* pOut, ma_uint64 frameCount
   // Phase-locked launch: jump to the grid-aligned input position exactly when
   // playback actually begins (first read after the scheduled start), so a column
   // switch continues from the same slice instead of restarting from 0.
+  // Adopt a freshly rendered (master-tempo) buffer if one is ready. This is an
+  // O(1) pointer swap under a try_lock, so the audio thread never blocks or
+  // allocates; the old buffer is freed later on the render thread.
+  if (v->pendingReady.load(std::memory_order_acquire)) {
+    if (v->swapMtx.try_lock()) {
+      if (v->pendingReady.load(std::memory_order_relaxed) && !v->pending.empty()) {
+        double oldF = v->origFrames > 0 ? (double)v->origFrames : 1.0;
+        double posFrac = (double)v->inPos / oldF;
+        v->orig.swap(v->pending);
+        v->origFrames = v->pendingFrames;
+        v->baseBpm = v->pendingBpm;
+        v->regionStart = (ma_uint64)(v->regionStartFrac * (double)v->origFrames);
+        v->regionEnd = (ma_uint64)(v->regionEndFrac * (double)v->origFrames);
+        if (v->regionEnd <= v->regionStart) v->regionEnd = v->origFrames;
+        v->inPos = (ma_uint64)(posFrac * (double)v->origFrames);
+        long long pin = v->pendingInPos.load();
+        if (pin >= 0) v->pendingInPos.store((long long)(((double)pin / oldF) * (double)v->origFrames));
+        v->ratio.store(v->masterBpmA.load() / (v->baseBpm > 0 ? v->baseBpm : 120.0));
+        v->stretch.reset();
+        v->pendingReady.store(false, std::memory_order_release);
+      }
+      v->swapMtx.unlock();
+    }
+  }
+
   long long pend = v->pendingInPos.exchange(-1);
   if (pend >= 0) { v->inPos = (ma_uint64)pend; v->ended = false; v->stretch.reset(); v->playPos.store(v->inPos); }
 
@@ -511,7 +536,10 @@ void LiveTraxCore::setMasterVolume(float vol) {
 // Live, seamless tempo: just update each voice's atomic ratio. No restart.
 void LiveTraxCore::setMasterTempo(double bpm) {
   if (bpm > 0) impl_->masterBpm = bpm;
-  for (auto& kv : impl_->pads) kv.second->ratio.store(impl_->ratioFor(kv.second.get()));
+  for (auto& kv : impl_->pads) {
+    kv.second->masterBpmA.store(impl_->masterBpm);
+    kv.second->ratio.store(impl_->ratioFor(kv.second.get()));
+  }
 }
 
 // Change one loop's own (base) tempo and re-lock its stretch ratio live, so the
@@ -669,7 +697,7 @@ const char* LiveTraxCore::activePadsJSON() {
     double ph = 0.0;
     if (state == 2 && v->regionLen() > 0) {
       long long rl = (long long)v->regionLen();
-      long long heard = (long long)v->playPos.load() - (long long)v->inLatency - (long long)v->regionStart;
+      long long heard = (long long)v->playPos.load() - (long long)(v->bypassing ? 0 : v->inLatency) - (long long)v->regionStart;
       heard %= rl; if (heard < 0) heard += rl;
       ph = (double)heard / (double)rl;
     }
