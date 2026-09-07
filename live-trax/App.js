@@ -162,6 +162,7 @@ export default function App() {
     const id = editorPadIdRef.current; if (!id) return;
     const nv = Math.max(20, Math.min(300, Math.round(v * 10) / 10));
     engine.setPadBpm(id, nv);
+    engine.applyTempo();
     setPads((prev) => { const pp = prev[id]; if (!pp) return prev; const next = { ...prev, [id]: { ...pp, bpm: nv } }; persistPads(next); return next; });
   }, [persistPads]);
 
@@ -245,6 +246,12 @@ export default function App() {
 
   // Apply engine settings live while a project is open.
   useEffect(() => { if (currentId) engine.setMasterTempo(bpm); }, [bpm, currentId]);
+  // On tempo settle, warp all loops to the master tempo (cheap steady-state).
+  useEffect(() => {
+    if (!currentId) return undefined;
+    const t = setTimeout(() => engine.applyTempo(), 300);
+    return () => clearTimeout(t);
+  }, [bpm, currentId]);
   useEffect(() => { if (currentId) engine.setMasterSignature(sig.num, sig.den); }, [sig, currentId]);
   useEffect(() => { if (currentId) engine.setQuantize(quantizeBeats); }, [quantizeBeats, currentId]);
 
@@ -294,6 +301,7 @@ export default function App() {
     }
     setPads({ ...padsCopy });
     applyMixer(mx);
+    engine.applyTempo();
     setTimeout(() => { openingRef.current = false; }, 500);
   }, []);
 
@@ -373,6 +381,7 @@ export default function App() {
     setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name, bpm: file.bpm || null } }; persistPads(next); return next; });
     engine.load(id, resolveSampleUri(file.uri), { bpm: loopBpm, loop: true }).then((dur) => {
       engine.setPadChannelGain(id, effChannel(mixerRef.current, target.instKey));
+      engine.applyTempo();
       setPads((prev) => {
         if (!prev[id]) return prev;
         const next = { ...prev, [id]: { ...prev[id], durationSec: dur } };
