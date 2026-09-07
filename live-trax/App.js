@@ -8,7 +8,7 @@ import { theme } from './src/theme';
 import { padId, quantizeLabel } from './src/config';
 import engine from './src/audio/engine';
 import syncStore from './src/audio/syncStore';
-import { importSampleFile, deleteSampleFile } from './src/storage/store';
+import { importSampleFile, deleteSampleFile, resolveSampleUri } from './src/storage/store';
 import { emptyLibrary, addFile } from './src/storage/library';
 import TransportBar from './src/components/TransportBar';
 import InstrumentGrid from './src/components/InstrumentGrid';
@@ -61,7 +61,7 @@ export default function App() {
             for (const id of Object.keys(saved.pads)) {
               const p = saved.pads[id];
               if (p?.uri) {
-                const dur = await engine.load(id, p.uri, { bpm: p.bpm || saved.bpm, loop: true });
+                const dur = await engine.load(id, resolveSampleUri(p.uri), { bpm: p.bpm || saved.bpm, loop: true });
                 saved.pads[id] = { ...p, durationSec: dur };
               }
             }
@@ -154,7 +154,7 @@ export default function App() {
       // Detect the loop's real BPM from the audio; fall back to the master tempo
       // only if detection fails (the user can still correct it in the library).
       let detected = 0;
-      try { detected = engine.estimateBpm(uri); } catch (e) { detected = 0; }
+      try { detected = engine.estimateBpm(resolveSampleUri(uri)); } catch (e) { detected = 0; }
       const loopBpm = detected > 0 ? detected : bpm;
       const { lib } = addFile(library, { name, uri, bpm: loopBpm }, folderId);
       onChangeLibrary(lib);
@@ -167,7 +167,7 @@ export default function App() {
     const id = padId(target.instKey, target.rowIndex);
     const loopBpm = file.bpm || bpm;
     setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name, bpm: file.bpm || null } }; persist(next); return next; });
-    engine.load(id, file.uri, { bpm: loopBpm, loop: true }).then((dur) => {
+    engine.load(id, resolveSampleUri(file.uri), { bpm: loopBpm, loop: true }).then((dur) => {
       setPads((prev) => {
         if (!prev[id]) return prev;
         const next = { ...prev, [id]: { ...prev[id], durationSec: dur } };
