@@ -150,6 +150,17 @@ class AudioEngine {
     try { return Native.estimateBpm(toPath(uri)) || 0; } catch (e) { return 0; }
   }
 
+  // Offline analysis pass: BPM + transient onset markers (loop fractions).
+  // Returns { bpm, beats, sampleRate, durationSec, beatOffset, onsets:[] } or null.
+  analyzeSample(uri) {
+    try {
+      const raw = Native.analyzeSample(toPath(uri));
+      if (!raw) return null;
+      const a = JSON.parse(raw);
+      return (a && typeof a.bpm === "number") ? a : null;
+    } catch (e) { return null; }
+  }
+
   getBaseBpm(padId) { return this.masterBpm; }
   setLoop(padId, loop) { /* set at load time in native */ }
   isLoaded(padId) { return this.loadedIds.has(padId); }

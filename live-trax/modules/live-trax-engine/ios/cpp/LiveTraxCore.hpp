@@ -48,6 +48,7 @@ public:
   double transportInfo(int which);
   double padDuration(const std::string& id); // loop length in seconds (0 if none)
   double estimateBpm(const std::string& path);   // analyze a file, return detected BPM (0 if unknown)
+  const char* analyzeSample(const std::string& path); // offline: BPM + transient markers (JSON)
 
   // ---- sample-edit params ----
   void setRegion(const std::string& id, double startFrac, double endFrac); // trim (0..1)

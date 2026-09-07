@@ -276,6 +276,7 @@ struct LiveTraxCore::Impl {
   bool transportPlaying = false;
   ma_uint64 transportStart = 0;    // engine frame of the grid origin
   std::string jsonBuf;
+  std::string analysisBuf; // offline analysis JSON (import-time, not UI-poll)
 
   void destroy(StretchVoice* v) {
     if (v->hasSound) { ma_sound_uninit(&v->sound); v->hasSound = false; }
@@ -679,6 +680,115 @@ double LiveTraxCore::estimateBpm(const std::string& path) {
   while (bpm > 170.0 && beats % 2 == 0)   { beats /= 2; bpm = (double)beats * 60.0 / durationSec; }
   bpm = std::round(bpm * 100.0) / 100.0; // 2 decimals
   return bpm;
+}
+
+// Offline analysis pass (run once on import). Returns JSON with the beat grid
+// and transient markers so the real-time path can warp cheaply against
+// pre-computed positions instead of analyzing the audio live.
+//   {"bpm":120.00,"beats":16,"sampleRate":48000,"durationSec":8.000,
+//    "beatOffset":0.000,"onsets":[0.000,0.062,...]}  // onsets are loop fractions
+const char* LiveTraxCore::analyzeSample(const std::string& path) {
+  std::string& out = impl_->analysisBuf;
+  out.clear();
+  ma_decoder_config dc = ma_decoder_config_init(ma_format_f32, 1, 0); // force mono
+  ma_decoder dec;
+  if (ma_decoder_init_file(path.c_str(), &dc, &dec) != MA_SUCCESS) { out = "{}"; return out.c_str(); }
+  ma_uint32 sr = dec.outputSampleRate;
+  ma_uint64 total = 0;
+  ma_decoder_get_length_in_pcm_frames(&dec, &total);
+  if (total == 0 || sr == 0) { ma_decoder_uninit(&dec); out = "{}"; return out.c_str(); }
+  std::vector<float> mono((size_t)total, 0.f);
+  ma_uint64 read = 0;
+  ma_decoder_read_pcm_frames(&dec, mono.data(), total, &read);
+  ma_decoder_uninit(&dec);
+  if (read < (ma_uint64)sr / 2) { out = "{}"; return out.c_str(); } // < 0.5s
+  double durationSec = (double)read / (double)sr;
+
+  // ---- onset-energy novelty envelope (same basis as estimateBpm) ----
+  const int H = 256; // hop
+  int nFrames = (int)(read / H);
+  if (nFrames < 8) { out = "{}"; return out.c_str(); }
+  std::vector<float> env(nFrames, 0.f);
+  double prev = 0.0;
+  for (int i = 0; i < nFrames; ++i) {
+    double e = 0.0;
+    const float* p = &mono[(size_t)i * H];
+    int nn = (int)std::min<ma_uint64>(H, read - (ma_uint64)i * H);
+    for (int j = 0; j < nn; ++j) e += (double)p[j] * (double)p[j];
+    double nov = e - prev; if (nov < 0) nov = 0;
+    env[i] = (float)nov;
+    prev = e;
+  }
+  double emean = 0.0; for (float x : env) emean += x; emean /= (double)nFrames;
+  for (auto& x : env) x = (float)std::max(0.0, (double)x - emean); // subtract DC
+
+  // ---- BPM: autocorrelation over the musical range, snapped to an integer
+  //      beat count (loops are a whole number of beats) ----
+  double frameRate = (double)sr / (double)H;
+  int minLag = (int)std::floor(frameRate * 60.0 / 180.0);
+  int maxLag = (int)std::ceil (frameRate * 60.0 / 70.0);
+  if (minLag < 1) minLag = 1;
+  if (maxLag > nFrames - 1) maxLag = nFrames - 1;
+  double bestScore = -1.0, bestBpm = 0.0;
+  for (int lag = minLag; lag <= maxLag; ++lag) {
+    double s = 0.0;
+    for (int i = lag; i < nFrames; ++i) s += (double)env[i] * (double)env[i - lag];
+    if (s > bestScore) { bestScore = s; bestBpm = 60.0 * frameRate / (double)lag; }
+  }
+  long beats = 0;
+  double bpm = 0.0;
+  if (bestBpm > 0.0) {
+    double beatPeriod = 60.0 / bestBpm;
+    beats = (long)std::lround(durationSec / beatPeriod);
+    if (beats < 1) beats = 1;
+    bpm = (double)beats * 60.0 / durationSec;
+    while (bpm < 70.0 && beats * 2 <= 1024) { beats *= 2; bpm = (double)beats * 60.0 / durationSec; }
+    while (bpm > 170.0 && beats % 2 == 0)   { beats /= 2; bpm = (double)beats * 60.0 / durationSec; }
+    bpm = std::round(bpm * 100.0) / 100.0;
+  }
+
+  // ---- transient peak-picking on the novelty envelope ----
+  // Local maximum, above an adaptive threshold (local mean + a slice of the
+  // global peak), with a minimum spacing so one hit isn't counted twice.
+  double gmax = 0.0; for (float x : env) if (x > gmax) gmax = x;
+  if (gmax <= 0.0) gmax = 1.0;
+  int win = (int)std::round(frameRate * 0.10); if (win < 2) win = 2; // ~100ms
+  int minSpace = 2;
+  if (bpm > 0.0) { double spb = frameRate * 60.0 / bpm; int m = (int)std::floor(spb * 0.375); if (m > minSpace) minSpace = m; } // ~1/8 note
+  std::vector<double> onsets;
+  int lastPeak = -minSpace * 4;
+  for (int i = 1; i < nFrames - 1; ++i) {
+    float x = env[i];
+    if (x <= env[i - 1] || x < env[i + 1]) continue; // local max
+    int a = i - win; if (a < 0) a = 0;
+    double lm = 0.0; for (int k = a; k <= i; ++k) lm += env[k]; lm /= (double)(i - a + 1);
+    if ((double)x < lm + 0.10 * gmax) continue;      // adaptive threshold
+    if (i - lastPeak < minSpace) continue;           // min spacing
+    onsets.push_back((double)((ma_uint64)i * H) / (double)read);
+    lastPeak = i;
+    if (onsets.size() >= 512) break;
+  }
+  double beatOffset = 0.0;
+  if (!onsets.empty() && bpm > 0.0) {
+    double beatFrac = (60.0 / bpm) / durationSec; // one beat as a loop fraction
+    if (onsets.front() < beatFrac) beatOffset = onsets.front();
+  }
+
+  // ---- emit JSON ----
+  char tmp[48];
+  out = "{";
+  snprintf(tmp, sizeof(tmp), "\"bpm\":%.2f,", bpm); out += tmp;
+  snprintf(tmp, sizeof(tmp), "\"beats\":%ld,", beats); out += tmp;
+  snprintf(tmp, sizeof(tmp), "\"sampleRate\":%u,", (unsigned)sr); out += tmp;
+  snprintf(tmp, sizeof(tmp), "\"durationSec\":%.3f,", durationSec); out += tmp;
+  snprintf(tmp, sizeof(tmp), "\"beatOffset\":%.4f,", beatOffset); out += tmp;
+  out += "\"onsets\":[";
+  for (size_t k = 0; k < onsets.size(); ++k) {
+    snprintf(tmp, sizeof(tmp), "%.4f%s", onsets[k], (k + 1 < onsets.size()) ? "," : "");
+    out += tmp;
+  }
+  out += "]}";
+  return out.c_str();
 }
 
 // ---- transport / sync ----
