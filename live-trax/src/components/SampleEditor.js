@@ -9,7 +9,7 @@ import Slider from './Slider';
 export const DEFAULT_EDIT = { gain: 1, startFrac: 0, endFrac: 1, fadeInMs: 0, fadeOutMs: 0, playMode: 0 };
 const MODES = [{ m: 0, label: 'Loop' }, { m: 1, label: 'One shot' }, { m: 2, label: 'Gate' }];
 const H = 160;
-const VPAD = 22; // vertical padding inside the spectrum so grips fit at top/bottom
+const VPAD = 6; // small vertical inset so the envelope never clips the border
 
 // On-screen sample editor (centered modal, like the tempo dial). Waveform with
 // draggable start/end trim, play mode, gain, fades, and tempo. The waveform path
@@ -162,11 +162,15 @@ function buildWavePath(peaks, W, H2, vpad = 0) {
   const n = peaks.length;
   const mid = H2 / 2;
   const amp = H2 / 2 - vpad;
+  let mx = 0.0001;
+  for (let i = 0; i < n; i++) if (peaks[i] > mx) mx = peaks[i];
+  const norm = 0.99 / mx; // scale the loudest peak to (almost) full height
+  const yv = (i) => Math.min(amp, peaks[i] * amp * norm);
   const step = W / n;
   let top = `M 0 ${mid}`;
-  for (let i = 0; i < n; i++) { const x = i * step; const y = mid - peaks[i] * amp; top += ` L ${x.toFixed(1)} ${y.toFixed(1)}`; }
+  for (let i = 0; i < n; i++) { const x = i * step; top += ` L ${x.toFixed(1)} ${(mid - yv(i)).toFixed(1)}`; }
   let bot = '';
-  for (let i = n - 1; i >= 0; i--) { const x = i * step; const y = mid + peaks[i] * amp; bot += ` L ${x.toFixed(1)} ${y.toFixed(1)}`; }
+  for (let i = n - 1; i >= 0; i--) { const x = i * step; bot += ` L ${x.toFixed(1)} ${(mid + yv(i)).toFixed(1)}`; }
   return `${top}${bot} Z`;
 }
 
