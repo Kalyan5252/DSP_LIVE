@@ -52,6 +52,7 @@ public:
   // ---- sample-edit params ----
   void setRegion(const std::string& id, double startFrac, double endFrac); // trim (0..1)
   void setPadGain(const std::string& id, double linear);
+  void setPadChannelGain(const std::string& id, double linear); // mixer channel volume
   void setPadFades(const std::string& id, double inMs, double outMs);
   void setPadPlayMode(const std::string& id, int mode); // 0 loop | 1 one-shot | 2 gate
   const char* waveform(const std::string& id, int buckets); // CSV peaks (0..1)

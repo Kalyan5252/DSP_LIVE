@@ -54,7 +54,8 @@ struct StretchVoice {
   // sample-edit params (trim region in INPUT frames, gain, fades, play mode)
   ma_uint64 regionStart = 0;
   ma_uint64 regionEnd = 0;              // 0 => use origFrames
-  std::atomic<float> gain{1.0f};        // linear
+  std::atomic<float> gain{1.0f};        // linear (sample-editor gain)
+  std::atomic<float> channelGain{1.0f}; // linear (mixer channel volume * mute/solo)
   int fadeInFrames = 0, fadeOutFrames = 0;
   int playMode = 0;                     // 0 loop | 1 one-shot | 2 gate
 
@@ -89,7 +90,7 @@ static ma_result voice_read(ma_data_source* ds, void* pOut, ma_uint64 frameCount
 
   ma_uint64 done = 0;
   const double r = std::min(kMaxRatio, std::max(kMinRatio, v->ratio.load()));
-  const float gain = v->gain.load();
+  const float gain = v->gain.load() * v->channelGain.load();
   const ma_uint64 regStart = v->regionStart;
   const ma_uint64 regEnd = v->regEnd();
   const ma_uint64 regionLen = v->regionLen();
@@ -607,6 +608,12 @@ void LiveTraxCore::setPadGain(const std::string& id, double linear) {
   auto it = impl_->pads.find(id);
   if (it == impl_->pads.end()) return;
   it->second->gain.store((float)(linear < 0 ? 0 : linear));
+}
+
+void LiveTraxCore::setPadChannelGain(const std::string& id, double linear) {
+  auto it = impl_->pads.find(id);
+  if (it == impl_->pads.end()) return;
+  it->second->channelGain.store((float)(linear < 0 ? 0 : linear));
 }
 
 void LiveTraxCore::setPadFades(const std::string& id, double inMs, double outMs) {
