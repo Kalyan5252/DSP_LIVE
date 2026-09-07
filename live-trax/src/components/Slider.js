@@ -27,7 +27,8 @@ export default function Slider({
     if (!dragging.current) { curFrac.current = frac; av.setValue(frac); setLabelVal(value); }
   }, [value, frac, av]);
 
-  const inner = () => Math.max(1, sizeRef.current - pad * 2);
+  const THUMB_V = 12;
+  const inner = () => Math.max(1, sizeRef.current - (vertical ? THUMB_V : 0));
   const emit = (f, commit) => {
     curFrac.current = f;
     av.setValue(f);
@@ -56,12 +57,15 @@ export default function Slider({
   const pctStr = av.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
 
   if (vertical) {
+    const range = Math.max(1, size - THUMB_V);
+    const thumbTop = av.interpolate({ inputRange: [0, 1], outputRange: [range, 0] });
+    const fillH = av.interpolate({ inputRange: [0, 1], outputRange: [0, size] });
     return (
       <View style={[styles.vWrap, style]} onLayout={(e) => setSize(e.nativeEvent.layout.height)} {...pan.panHandlers}>
-        <View style={[styles.vInner, { paddingVertical: pad }]}>
+        <View style={styles.vInner}>
           <View style={styles.vTrackBg} />
-          <Animated.View style={[styles.vFill, { height: pctStr }]} />
-          <Animated.View style={[styles.vThumb, { bottom: pctStr }]} />
+          <Animated.View style={[styles.vFill, { height: fillH }]} />
+          <Animated.View style={[styles.vThumb, { transform: [{ translateY: thumbTop }] }]} />
         </View>
       </View>
     );
@@ -96,8 +100,8 @@ const styles = StyleSheet.create({
   thumb: { position: 'absolute', width: 18, height: 18, borderRadius: 9, marginLeft: -9, backgroundColor: theme.text, borderWidth: 1, borderColor: theme.border },
 
   vWrap: { width: 40, flex: 1, minHeight: 70, alignItems: 'center' },
-  vInner: { flex: 1, width: 26, alignItems: 'center', justifyContent: 'flex-end' },
-  vTrackBg: { position: 'absolute', top: 0, bottom: 0, width: 3, borderRadius: 2, backgroundColor: theme.surfaceActive },
-  vFill: { position: 'absolute', bottom: 0, width: 3, backgroundColor: theme.good, borderRadius: 2 },
-  vThumb: { position: 'absolute', width: 26, height: 12, borderRadius: 6, marginBottom: -6, backgroundColor: theme.text, borderWidth: 1, borderColor: theme.border },
+  vInner: { flex: 1, width: 26 },
+  vTrackBg: { position: 'absolute', top: 0, bottom: 0, left: 11.5, width: 3, borderRadius: 2, backgroundColor: theme.surfaceActive },
+  vFill: { position: 'absolute', bottom: 0, left: 11.5, width: 3, backgroundColor: theme.good, borderRadius: 2 },
+  vThumb: { position: 'absolute', top: 0, left: 0, width: 26, height: 12, borderRadius: 6, backgroundColor: theme.text, borderWidth: 1, borderColor: theme.border },
 });
