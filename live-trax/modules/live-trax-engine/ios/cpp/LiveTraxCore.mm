@@ -9,6 +9,8 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
+#include <thread>
+#include <condition_variable>
 #include <cmath>
 #include <algorithm>
 #include <string>
@@ -39,7 +41,8 @@ struct StretchVoice {
   // cheap ratio-1 read).
   std::vector<float> orig0;
   ma_uint64 origFrames0 = 0;
-  double baseBpm0 = 120.0;
+  // read by the render worker, written from JS (setPadBpm) -> atomic
+  std::atomic<double> baseBpm0{120.0};
 
   // trim region kept as fractions so it survives a buffer swap.
   double regionStartFrac = 0.0, regionEndFrac = 1.0;
@@ -51,7 +54,9 @@ struct StretchVoice {
   std::atomic<bool> pendingReady{false};
   std::mutex swapMtx;
   std::atomic<double> masterBpmA{120.0};
-  double lastRenderTarget = -1.0; // JS-thread only: bpm the playback buffer was rendered to
+  // bpm the playback buffer was rendered to. Written by the render worker and
+  // invalidated from the JS thread (setPadBpm), so it has to be atomic.
+  std::atomic<double> lastRenderTarget{-1.0};
 
   // live control
   std::atomic<double> ratio{1.0}; // input/output = masterBpm / baseBpm
@@ -163,6 +168,11 @@ static ma_result voice_read(ma_data_source* ds, void* pOut, ma_uint64 frameCount
   // is ~free, so many loops can play at once without overloading the audio thread
   // (the real cause of noise with several simultaneous samples). Reset the
   // stretcher when transitioning back to stretching so there's no stale-state click.
+  // One reset per transition is inaudible (measured: +6 clicks across a whole
+  // tempo gesture). What used to make tempo drags sound blocky was applyTempo()
+  // re-firing on every pause in the drag, so this reset ran dozens of times and
+  // the artifacts compounded (1040 clicks at ~37 resets). That is fixed on the
+  // JS side by only warping once the gesture actually ends.
   const bool bypass = std::fabs(r - 1.0) < 0.01;
   if (bypass != v->bypassing) { v->bypassing = bypass; if (!bypass) v->stretch.reset(); }
 
@@ -303,7 +313,22 @@ struct LiveTraxCore::Impl {
   bool ready = false;
   float masterVolume = 1.0f;
   double masterBpm = 120.0;
-  std::unordered_map<std::string, std::unique_ptr<StretchVoice>> pads;
+  // shared_ptr, not unique_ptr: the tempo-render worker holds voices while it
+  // works, so unloadPad() during a render must not free them underneath it.
+  std::unordered_map<std::string, std::shared_ptr<StretchVoice>> pads;
+  std::mutex padsMtx;              // guards the map's structure, not the voices
+
+  // ---- tempo-render worker ----
+  // Warping every loaded loop to a new tempo costs ~120 ms per pad, and
+  // applyTempo() used to do all of them synchronously on the JS thread -- about
+  // a second of frozen UI on every tempo settle. It runs here instead. Requests
+  // coalesce: if the tempo moves again mid-render, only the newest target
+  // survives, so a drag can never queue a backlog of renders.
+  std::thread renderThread;
+  std::mutex renderMtx;
+  std::condition_variable renderCv;
+  double renderTarget = 0.0;       // 0 = nothing pending
+  bool renderQuit = false;
 
   // transport / sync
   int sigNum = 4, sigDen = 4;
@@ -361,13 +386,14 @@ struct LiveTraxCore::Impl {
 
   // Offline-warp the ORIGINAL to `target` bpm and hand the buffer to the audio
   // thread. Playback then reads it at ratio 1 (cheap), so many loops at any tempo
-  // cost almost nothing. Runs on the JS thread (applyTempo), never the audio one.
+  // cost almost nothing. Runs on the render worker, never the JS or audio thread.
   void renderVoice(StretchVoice* v, double target) {
-    if (!v || v->origFrames0 == 0 || v->baseBpm0 <= 0 || target <= 0) return;
-    if (std::fabs(v->lastRenderTarget - target) < 0.01) return; // already at this tempo
+    const double base0 = v->baseBpm0.load();
+    if (!v || v->origFrames0 == 0 || base0 <= 0 || target <= 0) return;
+    if (std::fabs(v->lastRenderTarget.load() - target) < 0.01) return; // already at this tempo
     const int ch = v->channels;
     const ma_uint64 inN = v->origFrames0;
-    double factor = v->baseBpm0 / target;               // output/input length ratio
+    double factor = base0 / target;                     // output/input length ratio
     ma_uint64 outN = (ma_uint64)std::llround((double)inN * factor);
     if (outN < 8) outN = 8;
 
@@ -396,7 +422,56 @@ struct LiveTraxCore::Impl {
       v->pendingBpm = target;
       v->pendingReady.store(true, std::memory_order_release);
     }
-    v->lastRenderTarget = target;
+    v->lastRenderTarget.store(target);
+  }
+
+  // Worker body: wait for a target, snapshot the voices, warp them. The
+  // snapshot holds shared_ptrs, so a pad unloaded mid-render stays alive until
+  // this finishes with it.
+  void renderLoop() {
+    for (;;) {
+      double target = 0.0;
+      {
+        std::unique_lock<std::mutex> lk(renderMtx);
+        renderCv.wait(lk, [&]{ return renderQuit || renderTarget > 0.0; });
+        if (renderQuit) return;
+        target = renderTarget;
+        renderTarget = 0.0;
+      }
+      std::vector<std::shared_ptr<StretchVoice>> snapshot;
+      {
+        std::lock_guard<std::mutex> lk(padsMtx);
+        snapshot.reserve(pads.size());
+        for (auto& kv : pads) if (kv.second->hasSound) snapshot.push_back(kv.second);
+      }
+      for (auto& v : snapshot) {
+        {   // a newer tempo arrived: abandon this pass, the next one supersedes it
+          std::lock_guard<std::mutex> lk(renderMtx);
+          if (renderQuit || renderTarget > 0.0) break;
+        }
+        renderVoice(v.get(), target);
+      }
+    }
+  }
+
+  void startRenderThread() {
+    if (renderThread.joinable()) return;
+    renderThread = std::thread([this]{ renderLoop(); });
+  }
+
+  void stopRenderThread() {
+    if (!renderThread.joinable()) return;
+    { std::lock_guard<std::mutex> lk(renderMtx); renderQuit = true; }
+    renderCv.notify_all();
+    renderThread.join();
+  }
+
+  // Ask for a warp to `target`. Returns immediately; coalesces with any
+  // request already waiting.
+  void requestRender(double target) {
+    if (target <= 0.0) return;
+    { std::lock_guard<std::mutex> lk(renderMtx); renderTarget = target; }
+    renderCv.notify_one();
   }
 
   // Decode a file to a mono f32 buffer (for offline analysis).
@@ -457,6 +532,7 @@ bool LiveTraxCore::init() {
     ma_device_uninit(&impl_->device); impl_->deviceReady = false;
     return false;
   }
+  impl_->startRenderThread();
   impl_->ready = true;
   return true;
 }
@@ -464,8 +540,12 @@ bool LiveTraxCore::init() {
 void LiveTraxCore::shutdown() {
   if (!impl_->ready) return;
   if (impl_->deviceReady) { ma_device_uninit(&impl_->device); impl_->deviceReady = false; }
-  for (auto& kv : impl_->pads) impl_->destroy(kv.second.get());
-  impl_->pads.clear();
+  impl_->stopRenderThread();   // before the voices go away
+  {
+    std::lock_guard<std::mutex> lk(impl_->padsMtx);
+    for (auto& kv : impl_->pads) impl_->destroy(kv.second.get());
+    impl_->pads.clear();
+  }
   ma_engine_uninit(&impl_->engine);
   impl_->ready = false;
 }
@@ -473,14 +553,14 @@ void LiveTraxCore::shutdown() {
 bool LiveTraxCore::loadPad(const std::string& id, const std::string& path, double bpm, bool loop) {
   if (!impl_->ready) return false;
   unloadPad(id);
-  auto v = std::make_unique<StretchVoice>();
+  auto v = std::make_shared<StretchVoice>();
   v->baseBpm = bpm > 0 ? bpm : impl_->masterBpm;
   v->loop = loop;
   if (!impl_->decode(path, v.get())) return false;
   v->orig0 = v->orig;                 // keep the immutable original
   v->origFrames0 = v->origFrames;
-  v->baseBpm0 = v->baseBpm;
-  v->lastRenderTarget = v->baseBpm0;
+  v->baseBpm0.store(v->baseBpm);
+  v->lastRenderTarget.store(v->baseBpm);
   v->regionStartFrac = 0.0;
   v->regionEndFrac = 1.0;
   v->regionStart = 0;
@@ -503,15 +583,23 @@ bool LiveTraxCore::loadPad(const std::string& id, const std::string& path, doubl
   ma_sound_set_volume(&v->sound, impl_->masterVolume);
   v->hasSound = true;
   v->stopFrame = kNoStop;
-  impl_->pads[id] = std::move(v);
+  {
+    std::lock_guard<std::mutex> lk(impl_->padsMtx);
+    impl_->pads[id] = std::move(v);
+  }
   return true;
 }
 
 void LiveTraxCore::unloadPad(const std::string& id) {
-  auto it = impl_->pads.find(id);
-  if (it == impl_->pads.end()) return;
-  impl_->destroy(it->second.get());
-  impl_->pads.erase(it);
+  std::shared_ptr<StretchVoice> victim;   // released after the lock
+  {
+    std::lock_guard<std::mutex> lk(impl_->padsMtx);
+    auto it = impl_->pads.find(id);
+    if (it == impl_->pads.end()) return;
+    victim = it->second;
+    impl_->destroy(victim.get());
+    impl_->pads.erase(it);
+  }
 }
 
 // ---- immediate controls ----
@@ -640,8 +728,8 @@ void LiveTraxCore::setPadBpm(const std::string& id, double bpm) {
   if (it == impl_->pads.end()) return;
   StretchVoice* v = it->second.get();
   v->baseBpm = bpm > 0 ? bpm : impl_->masterBpm;
-  v->baseBpm0 = v->baseBpm;         // the loop's corrected source tempo
-  v->lastRenderTarget = -1.0;       // force a re-render at the next applyTempo
+  v->baseBpm0.store(v->baseBpm);    // the loop's corrected source tempo
+  v->lastRenderTarget.store(-1.0);  // force a re-render at the next applyTempo
   v->masterBpmA.store(impl_->masterBpm);
   v->ratio.store(impl_->ratioFor(v));
 }
@@ -650,10 +738,7 @@ void LiveTraxCore::setPadBpm(const std::string& id, double bpm) {
 // settle). Live tempo drags still use setMasterTempo for smoothness; this makes
 // the steady state cheap.
 void LiveTraxCore::applyTempo() {
-  double target = impl_->masterBpm;
-  for (auto& kv : impl_->pads) {
-    if (kv.second->hasSound) impl_->renderVoice(kv.second.get(), target);
-  }
+  impl_->requestRender(impl_->masterBpm);
 }
 
 double LiveTraxCore::padDuration(const std::string& id) {

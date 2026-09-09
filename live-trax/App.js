@@ -77,6 +77,7 @@ export default function App() {
   // Working state for the OPEN project (mirrors projects.byId[currentId]).
   const [pads, setPads] = useState({});
   const [bpm, setBpm] = useState(120);
+  const [tempoDragging, setTempoDragging] = useState(false);
   const [sig, setSig] = useState({ num: 4, den: 4 });
   const [quantizeBeats, setQuantizeBeats] = useState(4);
   const [qOpen, setQOpen] = useState(false);
@@ -247,11 +248,18 @@ export default function App() {
   // Apply engine settings live while a project is open.
   useEffect(() => { if (currentId) engine.setMasterTempo(bpm); }, [bpm, currentId]);
   // On tempo settle, warp all loops to the master tempo (cheap steady-state).
+  //
+  // Only once the gesture has actually ENDED. A 300 ms timer alone re-fires on
+  // every pause in a slow drag, and each firing swaps all eight playback buffers
+  // and resets their stretchers. One reset is inaudible; dozens compound into
+  // the blocky artifact (measured: 34 clicks with no resets, 1040 with a reset
+  // every ~200 ms). While the dial is held, setMasterTempo alone keeps the mix
+  // moving — the stretchers track a changing ratio without any of this.
   useEffect(() => {
-    if (!currentId) return undefined;
+    if (!currentId || tempoDragging) return undefined;
     const t = setTimeout(() => engine.applyTempo(), 300);
     return () => clearTimeout(t);
-  }, [bpm, currentId]);
+  }, [bpm, currentId, tempoDragging]);
   useEffect(() => { if (currentId) engine.setMasterSignature(sig.num, sig.den); }, [sig, currentId]);
   useEffect(() => { if (currentId) engine.setQuantize(quantizeBeats); }, [quantizeBeats, currentId]);
 
@@ -476,7 +484,14 @@ export default function App() {
       </View>
 
       <SignaturePicker visible={sigOpen} num={sig.num} den={sig.den} onClose={() => setSigOpen(false)} onSelect={(num, den) => { setSig({ num, den }); setSigOpen(false); }} />
-      <TempoDial visible={tempoOpen} bpm={bpm} onClose={() => setTempoOpen(false)} onChange={(v) => setBpm(Math.max(20, Math.min(300, Math.round(v))))} />
+      <TempoDial
+        visible={tempoOpen}
+        bpm={bpm}
+        onClose={() => setTempoOpen(false)}
+        onChange={(v) => setBpm(Math.max(20, Math.min(300, Math.round(v))))}
+        onDragStart={() => setTempoDragging(true)}
+        onDragEnd={() => setTempoDragging(false)}
+      />
       <QuantizePicker visible={qOpen} value={quantizeBeats} onClose={() => setQOpen(false)} onSelect={(b) => { setQuantizeBeats(b); setQOpen(false); }} />
       <LibraryBrowser visible={libOpen} library={library} missing={missing} mode={libMode} onClose={() => setLibOpen(false)} onChangeLibrary={onChangeLibrary} onPick={onPickFile} onImport={onImport} />
       {editorPadId ? (
