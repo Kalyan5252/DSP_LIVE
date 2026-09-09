@@ -77,6 +77,7 @@ export default function App() {
   // Working state for the OPEN project (mirrors projects.byId[currentId]).
   const [pads, setPads] = useState({});
   const [bpm, setBpm] = useState(120);
+  const [tempoDragging, setTempoDragging] = useState(false);
   const [sig, setSig] = useState({ num: 4, den: 4 });
   const [quantizeBeats, setQuantizeBeats] = useState(4);
   const [qOpen, setQOpen] = useState(false);
@@ -162,6 +163,7 @@ export default function App() {
     const id = editorPadIdRef.current; if (!id) return;
     const nv = Math.max(20, Math.min(300, Math.round(v * 10) / 10));
     engine.setPadBpm(id, nv);
+    engine.applyTempo();
     setPads((prev) => { const pp = prev[id]; if (!pp) return prev; const next = { ...prev, [id]: { ...pp, bpm: nv } }; persistPads(next); return next; });
   }, [persistPads]);
 
@@ -245,6 +247,19 @@ export default function App() {
 
   // Apply engine settings live while a project is open.
   useEffect(() => { if (currentId) engine.setMasterTempo(bpm); }, [bpm, currentId]);
+  // On tempo settle, warp all loops to the master tempo (cheap steady-state).
+  //
+  // Only once the gesture has actually ENDED. A 300 ms timer alone re-fires on
+  // every pause in a slow drag, and each firing swaps all eight playback buffers
+  // and resets their stretchers. One reset is inaudible; dozens compound into
+  // the blocky artifact (measured: 34 clicks with no resets, 1040 with a reset
+  // every ~200 ms). While the dial is held, setMasterTempo alone keeps the mix
+  // moving — the stretchers track a changing ratio without any of this.
+  useEffect(() => {
+    if (!currentId || tempoDragging) return undefined;
+    const t = setTimeout(() => engine.applyTempo(), 300);
+    return () => clearTimeout(t);
+  }, [bpm, currentId, tempoDragging]);
   useEffect(() => { if (currentId) engine.setMasterSignature(sig.num, sig.den); }, [sig, currentId]);
   useEffect(() => { if (currentId) engine.setQuantize(quantizeBeats); }, [quantizeBeats, currentId]);
 
@@ -294,6 +309,7 @@ export default function App() {
     }
     setPads({ ...padsCopy });
     applyMixer(mx);
+    engine.applyTempo();
     setTimeout(() => { openingRef.current = false; }, 500);
   }, []);
 
@@ -357,10 +373,12 @@ export default function App() {
       const asset = res.assets[0];
       const uri = await importSampleFile(asset.uri, asset.name || 'loop');
       const name = (asset.name || 'Loop').replace(/\.[^.]+$/, '');
-      let detected = 0;
-      try { detected = engine.estimateBpm(resolveSampleUri(uri)); } catch (e) { detected = 0; }
+      // Offline analysis pass: detect BPM + transient markers once, at import.
+      let analysis = null;
+      try { analysis = await engine.analyzeSample(resolveSampleUri(uri)); } catch (e) { analysis = null; }
+      const detected = analysis && analysis.bpm > 0 ? analysis.bpm : 0;
       const loopBpm = detected > 0 ? detected : bpm;
-      const { lib } = addFile(library, { name, uri, bpm: loopBpm }, folderId);
+      const { lib } = addFile(library, { name, uri, bpm: loopBpm, analysis }, folderId);
       onChangeLibrary(lib);
     } catch (e) { /* ignore */ }
   }, [library, onChangeLibrary, bpm]);
@@ -370,9 +388,10 @@ export default function App() {
     if (!target) return;
     const id = padId(target.instKey, target.rowIndex);
     const loopBpm = file.bpm || bpm;
-    setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name, bpm: file.bpm || null } }; persistPads(next); return next; });
+    setPads((prev) => { const next = { ...prev, [id]: { uri: file.uri, name: file.name, bpm: file.bpm || null, analysis: file.analysis || null } }; persistPads(next); return next; });
     engine.load(id, resolveSampleUri(file.uri), { bpm: loopBpm, loop: true }).then((dur) => {
       engine.setPadChannelGain(id, effChannel(mixerRef.current, target.instKey));
+      engine.applyTempo();
       setPads((prev) => {
         if (!prev[id]) return prev;
         const next = { ...prev, [id]: { ...prev[id], durationSec: dur } };
@@ -465,7 +484,14 @@ export default function App() {
       </View>
 
       <SignaturePicker visible={sigOpen} num={sig.num} den={sig.den} onClose={() => setSigOpen(false)} onSelect={(num, den) => { setSig({ num, den }); setSigOpen(false); }} />
-      <TempoDial visible={tempoOpen} bpm={bpm} onClose={() => setTempoOpen(false)} onChange={(v) => setBpm(Math.max(20, Math.min(300, Math.round(v))))} />
+      <TempoDial
+        visible={tempoOpen}
+        bpm={bpm}
+        onClose={() => setTempoOpen(false)}
+        onChange={(v) => setBpm(Math.max(20, Math.min(300, Math.round(v))))}
+        onDragStart={() => setTempoDragging(true)}
+        onDragEnd={() => setTempoDragging(false)}
+      />
       <QuantizePicker visible={qOpen} value={quantizeBeats} onClose={() => setQOpen(false)} onSelect={(b) => { setQuantizeBeats(b); setQOpen(false); }} />
       <LibraryBrowser visible={libOpen} library={library} missing={missing} mode={libMode} onClose={() => setLibOpen(false)} onChangeLibrary={onChangeLibrary} onPick={onPickFile} onImport={onImport} />
       {editorPadId ? (

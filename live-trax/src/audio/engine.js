@@ -150,6 +150,27 @@ class AudioEngine {
     try { return Native.estimateBpm(toPath(uri)) || 0; } catch (e) { return 0; }
   }
 
+  // Offline analysis pass: BPM + transient onset markers (loop fractions).
+  // Runs on a native background queue, so this is async — resolves to
+  // { bpm, beats, sampleRate, durationSec, beatOffset, onsets:[] } or null.
+  async analyzeSample(uri) {
+    try {
+      const raw = await Native.analyzeSample(toPath(uri));
+      if (!raw) return null;
+      const a = JSON.parse(raw);
+      return (a && typeof a.bpm === "number") ? a : null;
+    } catch (e) { return null; }
+  }
+
+  // Audio-thread load, measured on the device inside the render callback.
+  // { avg, peak, overruns, callbacks } where 1.0 == the callback used its
+  // entire deadline (the point where audio drops out). Reading clears `peak`.
+  // This is the number to watch when judging whether the engine is throttling —
+  // JS-side timing can't see the audio thread at all.
+  audioLoad() {
+    try { return Native.audioLoad() || null; } catch (e) { return null; }
+  }
+
   getBaseBpm(padId) { return this.masterBpm; }
   setLoop(padId, loop) { /* set at load time in native */ }
   isLoaded(padId) { return this.loadedIds.has(padId); }

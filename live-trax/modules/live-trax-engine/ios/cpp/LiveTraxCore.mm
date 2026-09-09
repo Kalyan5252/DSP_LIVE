@@ -1,11 +1,16 @@
 #include "LiveTraxCore.hpp"
 #include "miniaudio.h"
 #include "signalsmith-stretch.h"
+#include "analysis_core.h"
 
 #include <unordered_map>
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <chrono>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
 #include <cmath>
 #include <algorithm>
 #include <string>
@@ -30,6 +35,28 @@ struct StretchVoice {
   ma_uint64 origFrames = 0;
   double baseBpm = 120.0;
   bool loop = true;
+
+  // immutable ORIGINAL (used to (re)render + draw the waveform); `orig` above is
+  // the CURRENT playback buffer (rendered to the master tempo, so playback is a
+  // cheap ratio-1 read).
+  std::vector<float> orig0;
+  ma_uint64 origFrames0 = 0;
+  // read by the render worker, written from JS (setPadBpm) -> atomic
+  std::atomic<double> baseBpm0{120.0};
+
+  // trim region kept as fractions so it survives a buffer swap.
+  double regionStartFrac = 0.0, regionEndFrac = 1.0;
+
+  // pre-render handoff (bg fills `pending`, audio thread swaps it into `orig`).
+  std::vector<float> pending;
+  ma_uint64 pendingFrames = 0;
+  double pendingBpm = 0.0;
+  std::atomic<bool> pendingReady{false};
+  std::mutex swapMtx;
+  std::atomic<double> masterBpmA{120.0};
+  // bpm the playback buffer was rendered to. Written by the render worker and
+  // invalidated from the JS thread (setPadBpm), so it has to be atomic.
+  std::atomic<double> lastRenderTarget{-1.0};
 
   // live control
   std::atomic<double> ratio{1.0}; // input/output = masterBpm / baseBpm
@@ -58,6 +85,7 @@ struct StretchVoice {
   std::atomic<float> channelGain{1.0f}; // linear (mixer channel volume * mute/solo)
   int fadeInFrames = 0, fadeOutFrames = 0;
   int playMode = 0;                     // 0 loop | 1 one-shot | 2 gate
+  bool bypassing = false;               // true when playing at native tempo (no stretch)
 
   ma_uint64 regEnd() const { return regionEnd > regionStart ? regionEnd : origFrames; }
   ma_uint64 regionLen() const { ma_uint64 e = regEnd(); return e > regionStart ? e - regionStart : 1; }
@@ -83,6 +111,31 @@ static ma_result voice_read(ma_data_source* ds, void* pOut, ma_uint64 frameCount
   // Phase-locked launch: jump to the grid-aligned input position exactly when
   // playback actually begins (first read after the scheduled start), so a column
   // switch continues from the same slice instead of restarting from 0.
+  // Adopt a freshly rendered (master-tempo) buffer if one is ready. This is an
+  // O(1) pointer swap under a try_lock, so the audio thread never blocks or
+  // allocates; the old buffer is freed later on the render thread.
+  if (v->pendingReady.load(std::memory_order_acquire)) {
+    if (v->swapMtx.try_lock()) {
+      if (v->pendingReady.load(std::memory_order_relaxed) && !v->pending.empty()) {
+        double oldF = v->origFrames > 0 ? (double)v->origFrames : 1.0;
+        double posFrac = (double)v->inPos / oldF;
+        v->orig.swap(v->pending);
+        v->origFrames = v->pendingFrames;
+        v->baseBpm = v->pendingBpm;
+        v->regionStart = (ma_uint64)(v->regionStartFrac * (double)v->origFrames);
+        v->regionEnd = (ma_uint64)(v->regionEndFrac * (double)v->origFrames);
+        if (v->regionEnd <= v->regionStart) v->regionEnd = v->origFrames;
+        v->inPos = (ma_uint64)(posFrac * (double)v->origFrames);
+        long long pin = v->pendingInPos.load();
+        if (pin >= 0) v->pendingInPos.store((long long)(((double)pin / oldF) * (double)v->origFrames));
+        v->ratio.store(v->masterBpmA.load() / (v->baseBpm > 0 ? v->baseBpm : 120.0));
+        v->stretch.reset();
+        v->pendingReady.store(false, std::memory_order_release);
+      }
+      v->swapMtx.unlock();
+    }
+  }
+
   long long pend = v->pendingInPos.exchange(-1);
   if (pend >= 0) { v->inPos = (ma_uint64)pend; v->ended = false; v->stretch.reset(); v->playPos.store(v->inPos); }
 
@@ -99,34 +152,66 @@ static ma_result voice_read(ma_data_source* ds, void* pOut, ma_uint64 frameCount
   const int mode = v->playMode;
   if (v->inPos < regStart || v->inPos > regEnd) v->inPos = regStart;
 
-  while (done < frameCount) {
-    int block = (int)std::min<ma_uint64>(frameCount - done, kMaxBlock);
-    int inNeed = std::max(1, (int)std::llround(block * r));
+  // envFor: fade-in/out + gain envelope at the voice's current input position.
+  auto envFor = [&]() -> float {
+    float env = gain;
+    ma_uint64 pos = v->inPos - regStart;
+    if (fIn > 0 && pos < (ma_uint64)fIn) env *= (float)pos / (float)fIn;
+    if (fOut > 0) {
+      ma_uint64 fromEnd = (regionLen > pos) ? (regionLen - 1 - pos) : 0;
+      if (fromEnd < (ma_uint64)fOut) env *= (float)fromEnd / (float)fOut;
+    }
+    return env;
+  };
 
-    // gather inNeed input frames within the trim region, applying gain + fades.
-    for (int i = 0; i < inNeed; ++i) {
+  // BYPASS: at (near) native tempo the stretcher is unnecessary — a straight copy
+  // is ~free, so many loops can play at once without overloading the audio thread
+  // (the real cause of noise with several simultaneous samples). Reset the
+  // stretcher when transitioning back to stretching so there's no stale-state click.
+  // One reset per transition is inaudible (measured: +6 clicks across a whole
+  // tempo gesture). What used to make tempo drags sound blocky was applyTempo()
+  // re-firing on every pause in the drag, so this reset ran dozens of times and
+  // the artifacts compounded (1040 clicks at ~37 resets). That is fixed on the
+  // JS side by only warping once the gesture actually ends.
+  const bool bypass = std::fabs(r - 1.0) < 0.01;
+  if (bypass != v->bypassing) { v->bypassing = bypass; if (!bypass) v->stretch.reset(); }
+
+  if (bypass) {
+    ma_uint64 f = 0;
+    for (; f < frameCount; ++f) {
       if (v->inPos >= regEnd) {
-        if (mode == 0) v->inPos = regStart;            // loop
-        else { for (int c = 0; c < ch; ++c) v->inCh[c][i] = 0.f; continue; } // one-shot/gate
+        if (mode == 0) v->inPos = regStart;
+        else break; // one-shot/gate: done
       }
-      float env = gain;
-      ma_uint64 pos = v->inPos - regStart;             // position within region
-      if (fIn > 0 && pos < (ma_uint64)fIn) env *= (float)pos / (float)fIn;
-      if (fOut > 0) {
-        ma_uint64 fromEnd = (regionLen > pos) ? (regionLen - 1 - pos) : 0;
-        if (fromEnd < (ma_uint64)fOut) env *= (float)fromEnd / (float)fOut;
-      }
+      float env = envFor();
       const float* src = &v->orig[(size_t)v->inPos * ch];
-      for (int c = 0; c < ch; ++c) v->inCh[c][i] = src[c] * env;
+      for (int c = 0; c < ch; ++c) out[(size_t)f * ch + c] = src[c] * env;
       v->inPos++;
     }
+    for (; f < frameCount; ++f) for (int c = 0; c < ch; ++c) out[(size_t)f * ch + c] = 0.f;
+  } else {
+    while (done < frameCount) {
+      int block = (int)std::min<ma_uint64>(frameCount - done, kMaxBlock);
+      int inNeed = std::max(1, (int)std::llround(block * r));
 
-    v->stretch.process(v->inPtr, inNeed, v->outPtr, block);
+      for (int i = 0; i < inNeed; ++i) {
+        if (v->inPos >= regEnd) {
+          if (mode == 0) v->inPos = regStart;
+          else { for (int c = 0; c < ch; ++c) v->inCh[c][i] = 0.f; continue; }
+        }
+        float env = envFor();
+        const float* src = &v->orig[(size_t)v->inPos * ch];
+        for (int c = 0; c < ch; ++c) v->inCh[c][i] = src[c] * env;
+        v->inPos++;
+      }
 
-    for (int i = 0; i < block; ++i)
-      for (int c = 0; c < ch; ++c) out[(size_t)(done + i) * ch + c] = v->outCh[c][i];
+      v->stretch.process(v->inPtr, inNeed, v->outPtr, block);
 
-    done += block;
+      for (int i = 0; i < block; ++i)
+        for (int c = 0; c < ch; ++c) out[(size_t)(done + i) * ch + c] = v->outCh[c][i];
+
+      done += block;
+    }
   }
 
   if (mode != 0 && v->inPos >= regEnd) v->ended = true; // one-shot/gate: stop after the tail
@@ -165,12 +250,85 @@ static ma_data_source_vtable g_vtable = {
 
 // ---------------------------------------------------------------------------
 
+// Master soft limiter: transparent below the threshold, gently saturates above,
+// so the summed mix of many simultaneous loops can never hard-clip (the harsh
+// digital noise). Stateless and cheap — runs on the audio thread.
+static inline float ltx_softlimit(float x) {
+  const float t = 0.8f;
+  float ax = x < 0.f ? -x : x;
+  if (ax <= t) return x;
+  float over = ax - t;
+  float comp = t + (1.0f - t) * std::tanh(over / (1.0f - t));
+  return x < 0.f ? -comp : comp;
+}
+
+// ---- audio-thread load meter ----------------------------------------------
+// "CPU throttling" is only actionable as a number measured ON THE DEVICE, so
+// time the whole callback (mix + limiter) against its deadline and publish it.
+//   load = time spent / (frameCount / sampleRate)
+// 1.0 means the callback used its entire budget — audio drops out at that
+// point. The audio thread is the only writer, so plain relaxed stores are
+// enough; no locks and no allocation here.
+struct AudioLoadMeter {
+  std::atomic<double> ema{0.0};       // smoothed load, 0..1+
+  std::atomic<double> peak{0.0};      // worst since last read
+  std::atomic<unsigned long long> callbacks{0};
+  std::atomic<unsigned long long> overruns{0}; // callbacks that missed deadline
+
+  void note(double seconds, ma_uint32 frames, ma_uint32 sampleRate) {
+    if (frames == 0 || sampleRate == 0) return;
+    double budget = (double)frames / (double)sampleRate;
+    double load = seconds / budget;
+    double e = ema.load(std::memory_order_relaxed);
+    // ~1 s time constant at a 256-frame callback: slow enough to read, fast
+    // enough to react to a pad launch.
+    e = e + 0.005 * (load - e);
+    ema.store(e, std::memory_order_relaxed);
+    if (load > peak.load(std::memory_order_relaxed))
+      peak.store(load, std::memory_order_relaxed);
+    callbacks.fetch_add(1, std::memory_order_relaxed);
+    if (load >= 1.0) overruns.fetch_add(1, std::memory_order_relaxed);
+  }
+};
+static AudioLoadMeter g_load;
+
+// Device callback: pull the mixed engine output, then limit it.
+static void ltx_data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
+  (void)pInput;
+  auto t0 = std::chrono::steady_clock::now();
+  ma_engine* engine = (ma_engine*)pDevice->pUserData;
+  ma_uint64 read = 0;
+  ma_engine_read_pcm_frames(engine, pOutput, frameCount, &read);
+  float* out = (float*)pOutput;
+  ma_uint32 n = frameCount * pDevice->playback.channels;
+  for (ma_uint32 i = 0; i < n; ++i) out[i] = ltx_softlimit(out[i]);
+  g_load.note(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+              frameCount, pDevice->sampleRate);
+}
+
 struct LiveTraxCore::Impl {
   ma_engine engine{};
+  ma_device device{};
+  bool deviceReady = false;
   bool ready = false;
   float masterVolume = 1.0f;
   double masterBpm = 120.0;
-  std::unordered_map<std::string, std::unique_ptr<StretchVoice>> pads;
+  // shared_ptr, not unique_ptr: the tempo-render worker holds voices while it
+  // works, so unloadPad() during a render must not free them underneath it.
+  std::unordered_map<std::string, std::shared_ptr<StretchVoice>> pads;
+  std::mutex padsMtx;              // guards the map's structure, not the voices
+
+  // ---- tempo-render worker ----
+  // Warping every loaded loop to a new tempo costs ~120 ms per pad, and
+  // applyTempo() used to do all of them synchronously on the JS thread -- about
+  // a second of frozen UI on every tempo settle. It runs here instead. Requests
+  // coalesce: if the tempo moves again mid-render, only the newest target
+  // survives, so a drag can never queue a backlog of renders.
+  std::thread renderThread;
+  std::mutex renderMtx;
+  std::condition_variable renderCv;
+  double renderTarget = 0.0;       // 0 = nothing pending
+  bool renderQuit = false;
 
   // transport / sync
   int sigNum = 4, sigDen = 4;
@@ -226,6 +384,128 @@ struct LiveTraxCore::Impl {
     return origin + k * q;
   }
 
+  // Offline-warp the ORIGINAL to `target` bpm and hand the buffer to the audio
+  // thread. Playback then reads it at ratio 1 (cheap), so many loops at any tempo
+  // cost almost nothing. Runs on the render worker, never the JS or audio thread.
+  void renderVoice(StretchVoice* v, double target) {
+    const double base0 = v->baseBpm0.load();
+    if (!v || v->origFrames0 == 0 || base0 <= 0 || target <= 0) return;
+    if (std::fabs(v->lastRenderTarget.load() - target) < 0.01) return; // already at this tempo
+    const int ch = v->channels;
+    const ma_uint64 inN = v->origFrames0;
+    double factor = base0 / target;                     // output/input length ratio
+    ma_uint64 outN = (ma_uint64)std::llround((double)inN * factor);
+    if (outN < 8) outN = 8;
+
+    std::vector<std::vector<float>> in(ch, std::vector<float>(inN, 0.f));
+    std::vector<std::vector<float>> out(ch, std::vector<float>(outN, 0.f));
+    for (ma_uint64 f = 0; f < inN; ++f)
+      for (int c = 0; c < ch; ++c) in[c][f] = v->orig0[(size_t)f * ch + c];
+    std::vector<float*> inP(ch), outP(ch);
+    for (int c = 0; c < ch; ++c) { inP[c] = in[c].data(); outP[c] = out[c].data(); }
+
+    signalsmith::stretch::SignalsmithStretch<float> st;
+    st.presetDefault(ch, (float)v->sampleRate);
+    // Prime once (warm the stretcher on the looping input), then capture the
+    // steady-state pass so the rendered loop joins seamlessly end-to-start.
+    st.process(inP.data(), (int)inN, outP.data(), (int)outN);
+    st.process(inP.data(), (int)inN, outP.data(), (int)outN);
+
+    // De-rotate before handing the buffer over.
+    //
+    // The stretcher's output lags its input, so the rendered loop does NOT start
+    // on the loop's downbeat -- it starts inputLatency (in input frames, hence
+    // /rate to reach output frames) plus outputLatency later. That offset scales
+    // with the loop's ORIGINAL tempo, so every loop came back displaced by a
+    // DIFFERENT amount: measured 125 ms for a 90 bpm source and 185 ms for a
+    // 174 bpm source warped to the same target. Loops played in sync until the
+    // first applyTempo() and were irregularly flammed afterwards, because before
+    // that they were still playing their un-rendered original buffers.
+    //
+    // A loop is circular, so rotating the render back by exactly that offset
+    // restores the downbeat to sample 0 (verified: 0.0 ms residual).
+    const double rate = (double)inN / (double)outN;
+    long long rot = std::llround(st.inputLatency() / rate + st.outputLatency());
+    rot %= (long long)outN; if (rot < 0) rot += (long long)outN;
+
+    std::vector<float> staged((size_t)outN * ch, 0.f);
+    for (ma_uint64 f = 0; f < outN; ++f) {
+      ma_uint64 src = (f + (ma_uint64)rot) % outN;
+      for (int c = 0; c < ch; ++c) staged[(size_t)f * ch + c] = out[c][src];
+    }
+
+    {
+      std::lock_guard<std::mutex> lk(v->swapMtx);
+      v->pending.swap(staged);
+      v->pendingFrames = outN;
+      v->pendingBpm = target;
+      v->pendingReady.store(true, std::memory_order_release);
+    }
+    v->lastRenderTarget.store(target);
+  }
+
+  // Worker body: wait for a target, snapshot the voices, warp them. The
+  // snapshot holds shared_ptrs, so a pad unloaded mid-render stays alive until
+  // this finishes with it.
+  void renderLoop() {
+    for (;;) {
+      double target = 0.0;
+      {
+        std::unique_lock<std::mutex> lk(renderMtx);
+        renderCv.wait(lk, [&]{ return renderQuit || renderTarget > 0.0; });
+        if (renderQuit) return;
+        target = renderTarget;
+        renderTarget = 0.0;
+      }
+      std::vector<std::shared_ptr<StretchVoice>> snapshot;
+      {
+        std::lock_guard<std::mutex> lk(padsMtx);
+        snapshot.reserve(pads.size());
+        for (auto& kv : pads) if (kv.second->hasSound) snapshot.push_back(kv.second);
+      }
+      for (auto& v : snapshot) {
+        {   // a newer tempo arrived: abandon this pass, the next one supersedes it
+          std::lock_guard<std::mutex> lk(renderMtx);
+          if (renderQuit || renderTarget > 0.0) break;
+        }
+        renderVoice(v.get(), target);
+      }
+    }
+  }
+
+  void startRenderThread() {
+    if (renderThread.joinable()) return;
+    renderThread = std::thread([this]{ renderLoop(); });
+  }
+
+  void stopRenderThread() {
+    if (!renderThread.joinable()) return;
+    { std::lock_guard<std::mutex> lk(renderMtx); renderQuit = true; }
+    renderCv.notify_all();
+    renderThread.join();
+  }
+
+  // Ask for a warp to `target`. Returns immediately; coalesces with any
+  // request already waiting.
+  void requestRender(double target) {
+    if (target <= 0.0) return;
+    { std::lock_guard<std::mutex> lk(renderMtx); renderTarget = target; }
+    renderCv.notify_one();
+  }
+
+  // Decode a file to a mono f32 buffer (for offline analysis).
+  bool decodeMono(const std::string& path, std::vector<float>& mono, int& sr) {
+    ma_decoder_config dc = ma_decoder_config_init(ma_format_f32, 1, 0);
+    ma_decoder dec;
+    if (ma_decoder_init_file(path.c_str(), &dc, &dec) != MA_SUCCESS) return false;
+    sr = (int)dec.outputSampleRate;
+    ma_uint64 total = 0; ma_decoder_get_length_in_pcm_frames(&dec, &total);
+    mono.assign((size_t)total, 0.f);
+    ma_uint64 read = 0; ma_decoder_read_pcm_frames(&dec, mono.data(), total, &read);
+    mono.resize((size_t)read); ma_decoder_uninit(&dec);
+    return read > 0;
+  }
+
   bool decode(const std::string& path, StretchVoice* v) {
     ma_decoder_config dc = ma_decoder_config_init(ma_format_f32, 0, 0);
     ma_decoder dec;
@@ -248,15 +528,43 @@ LiveTraxCore::~LiveTraxCore() { shutdown(); delete impl_; }
 
 bool LiveTraxCore::init() {
   if (impl_->ready) return true;
-  if (ma_engine_init(nullptr, &impl_->engine) != MA_SUCCESS) return false;
+
+  ma_device_config dcfg = ma_device_config_init(ma_device_type_playback);
+  dcfg.playback.format = ma_format_f32;
+  dcfg.playback.channels = 2;
+  dcfg.sampleRate = 0; // device default
+  dcfg.dataCallback = ltx_data_callback;
+  dcfg.pUserData = &impl_->engine;
+  if (ma_device_init(NULL, &dcfg, &impl_->device) != MA_SUCCESS) return false;
+  impl_->deviceReady = true;
+
+  ma_engine_config ecfg = ma_engine_config_init();
+  ecfg.noDevice = MA_TRUE;
+  ecfg.channels = impl_->device.playback.channels;
+  ecfg.sampleRate = impl_->device.sampleRate;
+  if (ma_engine_init(&ecfg, &impl_->engine) != MA_SUCCESS) {
+    ma_device_uninit(&impl_->device); impl_->deviceReady = false;
+    return false;
+  }
+  if (ma_device_start(&impl_->device) != MA_SUCCESS) {
+    ma_engine_uninit(&impl_->engine);
+    ma_device_uninit(&impl_->device); impl_->deviceReady = false;
+    return false;
+  }
+  impl_->startRenderThread();
   impl_->ready = true;
   return true;
 }
 
 void LiveTraxCore::shutdown() {
   if (!impl_->ready) return;
-  for (auto& kv : impl_->pads) impl_->destroy(kv.second.get());
-  impl_->pads.clear();
+  if (impl_->deviceReady) { ma_device_uninit(&impl_->device); impl_->deviceReady = false; }
+  impl_->stopRenderThread();   // before the voices go away
+  {
+    std::lock_guard<std::mutex> lk(impl_->padsMtx);
+    for (auto& kv : impl_->pads) impl_->destroy(kv.second.get());
+    impl_->pads.clear();
+  }
   ma_engine_uninit(&impl_->engine);
   impl_->ready = false;
 }
@@ -264,16 +572,22 @@ void LiveTraxCore::shutdown() {
 bool LiveTraxCore::loadPad(const std::string& id, const std::string& path, double bpm, bool loop) {
   if (!impl_->ready) return false;
   unloadPad(id);
-  auto v = std::make_unique<StretchVoice>();
+  auto v = std::make_shared<StretchVoice>();
   v->baseBpm = bpm > 0 ? bpm : impl_->masterBpm;
   v->loop = loop;
   if (!impl_->decode(path, v.get())) return false;
+  v->orig0 = v->orig;                 // keep the immutable original
+  v->origFrames0 = v->origFrames;
+  v->baseBpm0.store(v->baseBpm);
+  v->lastRenderTarget.store(v->baseBpm);
+  v->regionStartFrac = 0.0;
+  v->regionEndFrac = 1.0;
   v->regionStart = 0;
   v->regionEnd = v->origFrames;
   v->gain.store(1.0f);
   v->playMode = loop ? 0 : 1;
   v->allocScratch();
-  v->stretch.presetDefault(v->channels, (float)v->sampleRate);
+  v->stretch.presetCheaper(v->channels, (float)v->sampleRate); // lower CPU + split work (polyphony)
   v->inLatency = v->stretch.inputLatency();
   v->ratio.store(impl_->ratioFor(v.get()));
 
@@ -288,15 +602,23 @@ bool LiveTraxCore::loadPad(const std::string& id, const std::string& path, doubl
   ma_sound_set_volume(&v->sound, impl_->masterVolume);
   v->hasSound = true;
   v->stopFrame = kNoStop;
-  impl_->pads[id] = std::move(v);
+  {
+    std::lock_guard<std::mutex> lk(impl_->padsMtx);
+    impl_->pads[id] = std::move(v);
+  }
   return true;
 }
 
 void LiveTraxCore::unloadPad(const std::string& id) {
-  auto it = impl_->pads.find(id);
-  if (it == impl_->pads.end()) return;
-  impl_->destroy(it->second.get());
-  impl_->pads.erase(it);
+  std::shared_ptr<StretchVoice> victim;   // released after the lock
+  {
+    std::lock_guard<std::mutex> lk(impl_->padsMtx);
+    auto it = impl_->pads.find(id);
+    if (it == impl_->pads.end()) return;
+    victim = it->second;
+    impl_->destroy(victim.get());
+    impl_->pads.erase(it);
+  }
 }
 
 // ---- immediate controls ----
@@ -411,7 +733,10 @@ void LiveTraxCore::setMasterVolume(float vol) {
 // Live, seamless tempo: just update each voice's atomic ratio. No restart.
 void LiveTraxCore::setMasterTempo(double bpm) {
   if (bpm > 0) impl_->masterBpm = bpm;
-  for (auto& kv : impl_->pads) kv.second->ratio.store(impl_->ratioFor(kv.second.get()));
+  for (auto& kv : impl_->pads) {
+    kv.second->masterBpmA.store(impl_->masterBpm);
+    kv.second->ratio.store(impl_->ratioFor(kv.second.get()));
+  }
 }
 
 // Change one loop's own (base) tempo and re-lock its stretch ratio live, so the
@@ -422,10 +747,18 @@ void LiveTraxCore::setPadBpm(const std::string& id, double bpm) {
   if (it == impl_->pads.end()) return;
   StretchVoice* v = it->second.get();
   v->baseBpm = bpm > 0 ? bpm : impl_->masterBpm;
+  v->baseBpm0.store(v->baseBpm);    // the loop's corrected source tempo
+  v->lastRenderTarget.store(-1.0);  // force a re-render at the next applyTempo
+  v->masterBpmA.store(impl_->masterBpm);
   v->ratio.store(impl_->ratioFor(v));
 }
 
-void LiveTraxCore::applyTempo() { setMasterTempo(impl_->masterBpm); }
+// Warp every loaded loop to the current master tempo (called from JS on tempo
+// settle). Live tempo drags still use setMasterTempo for smoothness; this makes
+// the steady state cheap.
+void LiveTraxCore::applyTempo() {
+  impl_->requestRender(impl_->masterBpm);
+}
 
 double LiveTraxCore::padDuration(const std::string& id) {
   auto it = impl_->pads.find(id);
@@ -443,61 +776,24 @@ double LiveTraxCore::padDuration(const std::string& id) {
 //      loop length a whole number of beats (turns 87.6 into a clean 88), then
 //      fold into a musical range.
 double LiveTraxCore::estimateBpm(const std::string& path) {
-  ma_decoder_config dc = ma_decoder_config_init(ma_format_f32, 1, 0); // force mono
-  ma_decoder dec;
-  if (ma_decoder_init_file(path.c_str(), &dc, &dec) != MA_SUCCESS) return 0.0;
-  ma_uint32 sr = dec.outputSampleRate;
-  ma_uint64 total = 0;
-  ma_decoder_get_length_in_pcm_frames(&dec, &total);
-  if (total == 0 || sr == 0) { ma_decoder_uninit(&dec); return 0.0; }
-  std::vector<float> mono((size_t)total, 0.f);
-  ma_uint64 read = 0;
-  ma_decoder_read_pcm_frames(&dec, mono.data(), total, &read);
-  ma_decoder_uninit(&dec);
-  if (read < (ma_uint64)sr / 2) return 0.0; // < 0.5s, too short to analyze
-  double durationSec = (double)read / (double)sr;
+  std::vector<float> mono; int sr = 0;
+  if (!impl_->decodeMono(path, mono, sr)) return 0.0;
+  return analyzeMono(mono.data(), mono.size(), sr).bpm;
+}
 
-  // ---- onset-energy novelty envelope ----
-  const int H = 256; // hop
-  int nFrames = (int)(read / H);
-  if (nFrames < 8) return 0.0;
-  std::vector<float> env(nFrames, 0.f);
-  double prev = 0.0;
-  for (int i = 0; i < nFrames; ++i) {
-    double e = 0.0;
-    const float* p = &mono[(size_t)i * H];
-    int nn = (int)std::min<ma_uint64>(H, read - (ma_uint64)i * H);
-    for (int j = 0; j < nn; ++j) e += (double)p[j] * (double)p[j];
-    double nov = e - prev; if (nov < 0) nov = 0;
-    env[i] = (float)nov;
-    prev = e;
-  }
-  double mean = 0.0; for (float x : env) mean += x; mean /= (double)nFrames;
-  for (auto& x : env) x = (float)std::max(0.0, (double)x - mean); // subtract DC
-
-  // ---- autocorrelation over the musical BPM range ----
-  double frameRate = (double)sr / (double)H;
-  int minLag = (int)std::floor(frameRate * 60.0 / 180.0);
-  int maxLag = (int)std::ceil (frameRate * 60.0 / 70.0);
-  if (minLag < 1) minLag = 1;
-  if (maxLag > nFrames - 1) maxLag = nFrames - 1;
-  double bestScore = -1.0, bestBpm = 0.0;
-  for (int lag = minLag; lag <= maxLag; ++lag) {
-    double s = 0.0;
-    for (int i = lag; i < nFrames; ++i) s += (double)env[i] * (double)env[i - lag];
-    if (s > bestScore) { bestScore = s; bestBpm = 60.0 * frameRate / (double)lag; }
-  }
-  if (bestBpm <= 0.0) return 0.0;
-
-  // ---- loop-length snap: exact BPM from an integer beat count ----
-  double beatPeriod = 60.0 / bestBpm;
-  long beats = (long)std::lround(durationSec / beatPeriod);
-  if (beats < 1) beats = 1;
-  double bpm = (double)beats * 60.0 / durationSec;
-  while (bpm < 70.0 && beats * 2 <= 1024) { beats *= 2; bpm = (double)beats * 60.0 / durationSec; }
-  while (bpm > 170.0 && beats % 2 == 0)   { beats /= 2; bpm = (double)beats * 60.0 / durationSec; }
-  bpm = std::round(bpm * 100.0) / 100.0; // 2 decimals
-  return bpm;
+// Offline analysis pass (run once on import, off the JS thread). Returns JSON
+// with the beat grid
+// and transient markers so the real-time path can warp cheaply against
+// pre-computed positions instead of analyzing the audio live.
+//   {"bpm":120.00,"beats":16,"sampleRate":48000,"durationSec":8.000,
+//    "beatOffset":0.000,"onsets":[0.000,0.062,...]}  // onsets are loop fractions
+// Returns by value (no shared member buffer) because this now runs on a
+// background queue: two concurrent imports writing one engine-owned string
+// would hand the first caller a buffer the second had already reallocated.
+std::string LiveTraxCore::analyzeSample(const std::string& path) {
+  std::vector<float> mono; int sr = 0;
+  if (!impl_->decodeMono(path, mono, sr)) return "{}";
+  return toJson(analyzeMono(mono.data(), mono.size(), sr));
 }
 
 // ---- transport / sync ----
@@ -522,6 +818,21 @@ void LiveTraxCore::setMasterSignature(int num, int den) {
 
 void LiveTraxCore::setQuantize(double beats) {
   impl_->quantizeBeats = beats > 0 ? beats : 0.0;
+}
+
+// Audio-thread load, for on-device profiling.
+//   0 = smoothed load (1.0 == callback used its whole deadline)
+//   1 = peak load since the last read of this field (reading resets it)
+//   2 = callbacks that missed the deadline (cumulative)
+//   3 = total callbacks (cumulative)
+double LiveTraxCore::audioLoad(int which) {
+  switch (which) {
+    case 0: return g_load.ema.load(std::memory_order_relaxed);
+    case 1: return g_load.peak.exchange(0.0, std::memory_order_relaxed);
+    case 2: return (double)g_load.overruns.load(std::memory_order_relaxed);
+    case 3: return (double)g_load.callbacks.load(std::memory_order_relaxed);
+    default: return 0.0;
+  }
 }
 
 double LiveTraxCore::transportInfo(int which) {
@@ -569,7 +880,7 @@ const char* LiveTraxCore::activePadsJSON() {
     double ph = 0.0;
     if (state == 2 && v->regionLen() > 0) {
       long long rl = (long long)v->regionLen();
-      long long heard = (long long)v->playPos.load() - (long long)v->inLatency - (long long)v->regionStart;
+      long long heard = (long long)v->playPos.load() - (long long)(v->bypassing ? 0 : v->inLatency) - (long long)v->regionStart;
       heard %= rl; if (heard < 0) heard += rl;
       ph = (double)heard / (double)rl;
     }
@@ -596,6 +907,9 @@ void LiveTraxCore::setRegion(const std::string& id, double startFrac, double end
   if (v->origFrames == 0) return;
   double s = std::min(1.0, std::max(0.0, startFrac));
   double e = std::min(1.0, std::max(0.0, endFrac));
+  if (e <= s) e = std::min(1.0, s + 0.001);
+  v->regionStartFrac = s;
+  v->regionEndFrac = e;
   ma_uint64 sf = (ma_uint64)(s * (double)v->origFrames);
   ma_uint64 ef = (ma_uint64)(e * (double)v->origFrames);
   if (ef <= sf) ef = sf + 1;
@@ -639,7 +953,8 @@ const char* LiveTraxCore::waveform(const std::string& id, int buckets) {
   auto it = impl_->pads.find(id);
   if (it == impl_->pads.end()) return buf.c_str();
   StretchVoice* v = it->second.get();
-  ma_uint64 total = v->origFrames;
+  const std::vector<float>& wav = v->orig0.empty() ? v->orig : v->orig0;
+  ma_uint64 total = v->orig0.empty() ? v->origFrames : v->origFrames0;
   int ch = v->channels;
   if (total == 0) return buf.c_str();
   int n = buckets < 8 ? 8 : (buckets > 4096 ? 4096 : buckets);
@@ -651,7 +966,7 @@ const char* LiveTraxCore::waveform(const std::string& id, int buckets) {
     if (e > total) e = total;
     float peak = 0.f;
     for (ma_uint64 f = s; f < e; ++f) {
-      const float* src = &v->orig[(size_t)f * ch];
+      const float* src = &wav[(size_t)f * ch];
       for (int c = 0; c < ch; ++c) { float a = std::fabs(src[c]); if (a > peak) peak = a; }
     }
     if (peak > 1.f) peak = 1.f;

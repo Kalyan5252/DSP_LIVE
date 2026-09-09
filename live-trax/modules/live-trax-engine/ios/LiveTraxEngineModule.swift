@@ -20,8 +20,11 @@ import AVFAudio
 @_silgen_name("ltx_setMasterSignature") func ltx_setMasterSignature(_ num: Int32, _ den: Int32)
 @_silgen_name("ltx_setQuantize") func ltx_setQuantize(_ beats: Double)
 @_silgen_name("ltx_transportInfo") func ltx_transportInfo(_ which: Int32) -> Double
+@_silgen_name("ltx_audioLoad") func ltx_audioLoad(_ which: Int32) -> Double
 @_silgen_name("ltx_padDuration") func ltx_padDuration(_ id: UnsafePointer<CChar>) -> Double
 @_silgen_name("ltx_estimateBpm") func ltx_estimateBpm(_ path: UnsafePointer<CChar>) -> Double
+@_silgen_name("ltx_analyzeSample") func ltx_analyzeSample(_ path: UnsafePointer<CChar>) -> UnsafePointer<CChar>?
+@_silgen_name("ltx_freeString") func ltx_freeString(_ p: UnsafePointer<CChar>)
 @_silgen_name("ltx_setRegion") func ltx_setRegion(_ id: UnsafePointer<CChar>, _ s: Double, _ e: Double)
 @_silgen_name("ltx_setPadGain") func ltx_setPadGain(_ id: UnsafePointer<CChar>, _ g: Double)
 @_silgen_name("ltx_setPadChannelGain") func ltx_setPadChannelGain(_ id: UnsafePointer<CChar>, _ g: Double)
@@ -61,12 +64,35 @@ public class LiveTraxEngineModule: Module {
     Function("setPadBpm") { (padId: String, bpm: Double) in padId.withCString { ltx_setPadBpm($0, bpm) } }
     Function("applyTempo") { ltx_applyTempo() }
 
+    // Audio-thread load, for on-device profiling. load >= 1.0 means the
+    // callback used its whole deadline, which is where audio drops out.
+    Function("audioLoad") { () -> [String: Double] in
+      [
+        "avg": ltx_audioLoad(0),
+        "peak": ltx_audioLoad(1),      // reading resets the peak
+        "overruns": ltx_audioLoad(2),
+        "callbacks": ltx_audioLoad(3),
+      ]
+    }
+
     Function("startTransport") { ltx_startTransport() }
     Function("stopTransport") { ltx_stopTransport() }
     Function("setMasterSignature") { (num: Int, den: Int) in ltx_setMasterSignature(Int32(num), Int32(den)) }
     Function("setQuantize") { (beats: Double) in ltx_setQuantize(beats) }
     Function("padDuration") { (padId: String) -> Double in padId.withCString { ltx_padDuration($0) } }
     Function("estimateBpm") { (path: String) -> Double in path.withCString { ltx_estimateBpm($0) } }
+    // AsyncFunction: analysis is ~1 s of DSP on a long file, so it runs on the
+    // module's background queue instead of blocking JS through the whole import.
+    AsyncFunction("analyzeSample") { (path: String) -> String in
+      var out = "{}"
+      path.withCString {
+        if let p = ltx_analyzeSample($0) {
+          out = String(cString: p)
+          ltx_freeString(p)          // we own this copy
+        }
+      }
+      return out
+    }
     Function("setRegion") { (id: String, s: Double, e: Double) in id.withCString { ltx_setRegion($0, s, e) } }
     Function("setPadGain") { (id: String, g: Double) in id.withCString { ltx_setPadGain($0, g) } }
     Function("setPadChannelGain") { (id: String, g: Double) in id.withCString { ltx_setPadChannelGain($0, g) } }

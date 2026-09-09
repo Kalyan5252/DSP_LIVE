@@ -17,22 +17,33 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const bpmToT = (bpm) => (clamp(bpm, MIN, MAX) - MIN) / (MAX - MIN);
 const tToDeg = (t) => -90 + t * 180;
 
-export default function TempoDial({ visible, bpm, onClose, onChange }) {
+export default function TempoDial({ visible, bpm, onClose, onChange, onDragStart, onDragEnd }) {
+  // PanResponder is built once, so it would capture the first render's
+  // callbacks. Route through a ref that every render refreshes.
+  const cb = useRef({ onChange, onDragStart, onDragEnd });
+  cb.current = { onChange, onDragStart, onDragEnd };
+
   const setFromTouch = (x, y) => {
     const dx = x - CX;
     const dyUp = CY - y;
     let deg = (Math.atan2(dx, dyUp) * 180) / Math.PI;
     deg = clamp(deg, -90, 90);
     const t = (deg + 90) / 180;
-    onChange(Math.round(MIN + t * (MAX - MIN)));
+    cb.current.onChange(Math.round(MIN + t * (MAX - MIN)));
   };
 
   const pan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (e) => setFromTouch(e.nativeEvent.locationX, e.nativeEvent.locationY),
+      onPanResponderGrant: (e) => {
+        cb.current.onDragStart && cb.current.onDragStart();
+        setFromTouch(e.nativeEvent.locationX, e.nativeEvent.locationY);
+      },
       onPanResponderMove: (e) => setFromTouch(e.nativeEvent.locationX, e.nativeEvent.locationY),
+      // Warping every loop is only safe once the gesture is over — see App.js.
+      onPanResponderRelease: () => cb.current.onDragEnd && cb.current.onDragEnd(),
+      onPanResponderTerminate: () => cb.current.onDragEnd && cb.current.onDragEnd(),
     })
   ).current;
 
