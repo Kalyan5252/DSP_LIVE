@@ -367,7 +367,7 @@ export default function App() {
       const name = (asset.name || 'Loop').replace(/\.[^.]+$/, '');
       // Offline analysis pass: detect BPM + transient markers once, at import.
       let analysis = null;
-      try { analysis = engine.analyzeSample(resolveSampleUri(uri)); } catch (e) { analysis = null; }
+      try { analysis = await engine.analyzeSample(resolveSampleUri(uri)); } catch (e) { analysis = null; }
       const detected = analysis && analysis.bpm > 0 ? analysis.bpm : 0;
       const loopBpm = detected > 0 ? detected : bpm;
       const { lib } = addFile(library, { name, uri, bpm: loopBpm, analysis }, folderId);

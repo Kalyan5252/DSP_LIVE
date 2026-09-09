@@ -23,6 +23,7 @@ import AVFAudio
 @_silgen_name("ltx_padDuration") func ltx_padDuration(_ id: UnsafePointer<CChar>) -> Double
 @_silgen_name("ltx_estimateBpm") func ltx_estimateBpm(_ path: UnsafePointer<CChar>) -> Double
 @_silgen_name("ltx_analyzeSample") func ltx_analyzeSample(_ path: UnsafePointer<CChar>) -> UnsafePointer<CChar>?
+@_silgen_name("ltx_freeString") func ltx_freeString(_ p: UnsafePointer<CChar>)
 @_silgen_name("ltx_setRegion") func ltx_setRegion(_ id: UnsafePointer<CChar>, _ s: Double, _ e: Double)
 @_silgen_name("ltx_setPadGain") func ltx_setPadGain(_ id: UnsafePointer<CChar>, _ g: Double)
 @_silgen_name("ltx_setPadChannelGain") func ltx_setPadChannelGain(_ id: UnsafePointer<CChar>, _ g: Double)
@@ -68,9 +69,16 @@ public class LiveTraxEngineModule: Module {
     Function("setQuantize") { (beats: Double) in ltx_setQuantize(beats) }
     Function("padDuration") { (padId: String) -> Double in padId.withCString { ltx_padDuration($0) } }
     Function("estimateBpm") { (path: String) -> Double in path.withCString { ltx_estimateBpm($0) } }
-    Function("analyzeSample") { (path: String) -> String in
+    // AsyncFunction: analysis is ~1 s of DSP on a long file, so it runs on the
+    // module's background queue instead of blocking JS through the whole import.
+    AsyncFunction("analyzeSample") { (path: String) -> String in
       var out = "{}"
-      path.withCString { if let p = ltx_analyzeSample($0) { out = String(cString: p) } }
+      path.withCString {
+        if let p = ltx_analyzeSample($0) {
+          out = String(cString: p)
+          ltx_freeString(p)          // we own this copy
+        }
+      }
       return out
     }
     Function("setRegion") { (id: String, s: Double, e: Double) in id.withCString { ltx_setRegion($0, s, e) } }

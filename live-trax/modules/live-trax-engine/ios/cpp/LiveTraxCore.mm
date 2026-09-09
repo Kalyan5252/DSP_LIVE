@@ -277,7 +277,6 @@ struct LiveTraxCore::Impl {
   bool transportPlaying = false;
   ma_uint64 transportStart = 0;    // engine frame of the grid origin
   std::string jsonBuf;
-  std::string analysisBuf; // offline analysis JSON (import-time, not UI-poll)
 
   void destroy(StretchVoice* v) {
     if (v->hasSound) { ma_sound_uninit(&v->sound); v->hasSound = false; }
@@ -644,17 +643,19 @@ double LiveTraxCore::estimateBpm(const std::string& path) {
   return analyzeMono(mono.data(), mono.size(), sr).bpm;
 }
 
-// Offline analysis pass (run once on import). Returns JSON with the beat grid
+// Offline analysis pass (run once on import, off the JS thread). Returns JSON
+// with the beat grid
 // and transient markers so the real-time path can warp cheaply against
 // pre-computed positions instead of analyzing the audio live.
 //   {"bpm":120.00,"beats":16,"sampleRate":48000,"durationSec":8.000,
 //    "beatOffset":0.000,"onsets":[0.000,0.062,...]}  // onsets are loop fractions
-const char* LiveTraxCore::analyzeSample(const std::string& path) {
-  impl_->analysisBuf = "{}";
+// Returns by value (no shared member buffer) because this now runs on a
+// background queue: two concurrent imports writing one engine-owned string
+// would hand the first caller a buffer the second had already reallocated.
+std::string LiveTraxCore::analyzeSample(const std::string& path) {
   std::vector<float> mono; int sr = 0;
-  if (impl_->decodeMono(path, mono, sr))
-    impl_->analysisBuf = toJson(analyzeMono(mono.data(), mono.size(), sr));
-  return impl_->analysisBuf.c_str();
+  if (!impl_->decodeMono(path, mono, sr)) return "{}";
+  return toJson(analyzeMono(mono.data(), mono.size(), sr));
 }
 
 // ---- transport / sync ----

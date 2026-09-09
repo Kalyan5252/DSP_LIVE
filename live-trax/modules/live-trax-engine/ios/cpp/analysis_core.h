@@ -155,6 +155,36 @@ inline std::vector<float> onsetEnvelope(const std::vector<float>& mono, int sr,
   }
   return env;
 }
+
+// Snap a flux-frame index to a sample-accurate attack position.
+//
+// A Hann-windowed spectral flux fires EARLY: the window's steepest rise is at
+// its 3/4 point, so frame f peaks while the attack is still ~3N/4 samples past
+// the window start. Reporting f*H therefore places every marker ~32 ms before
+// the transient at 2048/512 — audible as a flam when the markers drive slicing.
+// The attack is somewhere in [f*H, f*H+N), so look there for the steepest
+// short-term energy rise. This also handles a transient at sample 0, where the
+// blind lead correction would push the marker the wrong way.
+inline size_t refineOnset(const std::vector<float>& mono, size_t from, size_t to) {
+  const int B = 64;                  // ~1.3 ms blocks at 48 kHz
+  if (to > mono.size()) to = mono.size();
+  if (to <= from) return from;
+  int nb = (int)((to - from) / B);
+  if (nb < 3) return from;
+  std::vector<double> e(nb, 0.0);
+  for (int b = 0; b < nb; ++b) {
+    double s = 0.0; size_t o = from + (size_t)b * B;
+    for (int j = 0; j < B; ++j) { double v = mono[o + j]; s += v * v; }
+    e[b] = std::sqrt(s / B);
+  }
+  int best = 0; double bestRise = -1.0;
+  for (int b = 1; b < nb; ++b) {
+    double rise = e[b] - e[b - 1];
+    if (rise > bestRise) { bestRise = rise; best = b; }
+  }
+  return from + (size_t)best * B;    // attack starts at the top of that block
+}
+
 } // namespace detail
 
 // Pure DSP pipeline. `mono` = single-channel f32, `frames` samples at `sr` Hz.
@@ -294,7 +324,17 @@ inline TempoAnalysis analyzeMono(const float* monoPtr, size_t frames, int sr,
   }
   A.bpm = std::round(bpm * 100.0) / 100.0;
   A.beats = std::lround(A.durationSec * A.bpm / 60.0);
-  A.beatOffset = win.phaseFrac;
+  // The grid phase comes off the same early-firing envelope, so it inherits the
+  // same ~3N/4-sample lead. Correct it and re-wrap into the first beat.
+  if (A.bpm > 0 && frameRate > 0) {
+    double beatSec  = 60.0 / A.bpm;
+    double phaseSec = win.phaseFrac * A.durationSec + 0.75 * (double)cfg.fftSize / (double)sr;
+    phaseSec = std::fmod(phaseSec, beatSec);
+    if (phaseSec < 0) phaseSec += beatSec;
+    A.beatOffset = (A.durationSec > 0) ? phaseSec / A.durationSec : 0.0;
+  } else {
+    A.beatOffset = win.phaseFrac;
+  }
 
   // confidence: separation from the runner-up + absolute alignment
   double sep = 1.0;
@@ -312,14 +352,28 @@ inline TempoAnalysis analyzeMono(const float* monoPtr, size_t frames, int sr,
   int lastPeak = -minSpace * 4;
   std::vector<double> pref(nF + 1, 0.0);
   for (int i = 0; i < nF; ++i) pref[i+1] = pref[i] + O[i];
-  for (int i = 1; i < nF - 1; ++i) {
+  // i starts at 0 so a transient in the very first frame — the downbeat of a
+  // tightly trimmed loop, the single most useful marker — can still win.
+  for (int i = 0; i < nF - 1; ++i) {
     float x = O[i];
-    if (x <= O[i-1] || x < O[i+1]) continue;
-    int a = std::max(0, i - win2);
-    double lm = (pref[i+1] - pref[a]) / (double)(i - a + 1);
+    float lft = (i > 0) ? O[i-1] : 0.f;
+    if (x <= lft || x < O[i+1]) continue;
+    // Centered local mean. A backward-only window degenerates at i == 0 (the
+    // mean becomes the sample itself, so the test can never pass) — which is
+    // exactly why a transient on the very first frame was never marked.
+    int a = std::max(0, i - win2), b = std::min(nF - 1, i + win2);
+    double lm = (pref[b+1] - pref[a]) / (double)(b - a + 1);
     if ((double)x < lm + 0.10 * gmax) continue;
     if (i - lastPeak < minSpace) continue;
-    A.onsets.push_back((double)((size_t)i * cfg.hop) / (double)frames);
+    size_t from = (size_t)i * cfg.hop;
+    size_t pos  = detail::refineOnset(mono, from, from + (size_t)cfg.fftSize);
+    // Refinement moves a marker forward by up to fftSize, so with the shipped
+    // config (minSpace >= 10 frames vs a 4-frame search) order is preserved —
+    // but guard it, or a retuned bpmMax/fftSize would silently emit unsorted
+    // markers and scramble every slice downstream.
+    if (pos >= frames) { lastPeak = i; continue; }
+    if (!A.onsets.empty() && (double)pos / (double)frames <= A.onsets.back()) { lastPeak = i; continue; }
+    A.onsets.push_back((double)pos / (double)frames);
     lastPeak = i;
     if (A.onsets.size() >= 512) break;
   }

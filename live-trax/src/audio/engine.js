@@ -151,10 +151,11 @@ class AudioEngine {
   }
 
   // Offline analysis pass: BPM + transient onset markers (loop fractions).
-  // Returns { bpm, beats, sampleRate, durationSec, beatOffset, onsets:[] } or null.
-  analyzeSample(uri) {
+  // Runs on a native background queue, so this is async — resolves to
+  // { bpm, beats, sampleRate, durationSec, beatOffset, onsets:[] } or null.
+  async analyzeSample(uri) {
     try {
-      const raw = Native.analyzeSample(toPath(uri));
+      const raw = await Native.analyzeSample(toPath(uri));
       if (!raw) return null;
       const a = JSON.parse(raw);
       return (a && typeof a.bpm === "number") ? a : null;
