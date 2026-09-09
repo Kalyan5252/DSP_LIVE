@@ -162,6 +162,15 @@ class AudioEngine {
     } catch (e) { return null; }
   }
 
+  // Audio-thread load, measured on the device inside the render callback.
+  // { avg, peak, overruns, callbacks } where 1.0 == the callback used its
+  // entire deadline (the point where audio drops out). Reading clears `peak`.
+  // This is the number to watch when judging whether the engine is throttling —
+  // JS-side timing can't see the audio thread at all.
+  audioLoad() {
+    try { return Native.audioLoad() || null; } catch (e) { return null; }
+  }
+
   getBaseBpm(padId) { return this.masterBpm; }
   setLoop(padId, loop) { /* set at load time in native */ }
   isLoaded(padId) { return this.loadedIds.has(padId); }

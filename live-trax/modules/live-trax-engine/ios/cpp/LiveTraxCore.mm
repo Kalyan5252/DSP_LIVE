@@ -7,6 +7,7 @@
 #include <vector>
 #include <memory>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <cmath>
 #include <algorithm>
@@ -251,15 +252,48 @@ static inline float ltx_softlimit(float x) {
   return x < 0.f ? -comp : comp;
 }
 
+// ---- audio-thread load meter ----------------------------------------------
+// "CPU throttling" is only actionable as a number measured ON THE DEVICE, so
+// time the whole callback (mix + limiter) against its deadline and publish it.
+//   load = time spent / (frameCount / sampleRate)
+// 1.0 means the callback used its entire budget — audio drops out at that
+// point. The audio thread is the only writer, so plain relaxed stores are
+// enough; no locks and no allocation here.
+struct AudioLoadMeter {
+  std::atomic<double> ema{0.0};       // smoothed load, 0..1+
+  std::atomic<double> peak{0.0};      // worst since last read
+  std::atomic<unsigned long long> callbacks{0};
+  std::atomic<unsigned long long> overruns{0}; // callbacks that missed deadline
+
+  void note(double seconds, ma_uint32 frames, ma_uint32 sampleRate) {
+    if (frames == 0 || sampleRate == 0) return;
+    double budget = (double)frames / (double)sampleRate;
+    double load = seconds / budget;
+    double e = ema.load(std::memory_order_relaxed);
+    // ~1 s time constant at a 256-frame callback: slow enough to read, fast
+    // enough to react to a pad launch.
+    e = e + 0.005 * (load - e);
+    ema.store(e, std::memory_order_relaxed);
+    if (load > peak.load(std::memory_order_relaxed))
+      peak.store(load, std::memory_order_relaxed);
+    callbacks.fetch_add(1, std::memory_order_relaxed);
+    if (load >= 1.0) overruns.fetch_add(1, std::memory_order_relaxed);
+  }
+};
+static AudioLoadMeter g_load;
+
 // Device callback: pull the mixed engine output, then limit it.
 static void ltx_data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
   (void)pInput;
+  auto t0 = std::chrono::steady_clock::now();
   ma_engine* engine = (ma_engine*)pDevice->pUserData;
   ma_uint64 read = 0;
   ma_engine_read_pcm_frames(engine, pOutput, frameCount, &read);
   float* out = (float*)pOutput;
   ma_uint32 n = frameCount * pDevice->playback.channels;
   for (ma_uint32 i = 0; i < n; ++i) out[i] = ltx_softlimit(out[i]);
+  g_load.note(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+              frameCount, pDevice->sampleRate);
 }
 
 struct LiveTraxCore::Impl {
@@ -680,6 +714,21 @@ void LiveTraxCore::setMasterSignature(int num, int den) {
 
 void LiveTraxCore::setQuantize(double beats) {
   impl_->quantizeBeats = beats > 0 ? beats : 0.0;
+}
+
+// Audio-thread load, for on-device profiling.
+//   0 = smoothed load (1.0 == callback used its whole deadline)
+//   1 = peak load since the last read of this field (reading resets it)
+//   2 = callbacks that missed the deadline (cumulative)
+//   3 = total callbacks (cumulative)
+double LiveTraxCore::audioLoad(int which) {
+  switch (which) {
+    case 0: return g_load.ema.load(std::memory_order_relaxed);
+    case 1: return g_load.peak.exchange(0.0, std::memory_order_relaxed);
+    case 2: return (double)g_load.overruns.load(std::memory_order_relaxed);
+    case 3: return (double)g_load.callbacks.load(std::memory_order_relaxed);
+    default: return 0.0;
+  }
 }
 
 double LiveTraxCore::transportInfo(int which) {

@@ -20,6 +20,7 @@ import AVFAudio
 @_silgen_name("ltx_setMasterSignature") func ltx_setMasterSignature(_ num: Int32, _ den: Int32)
 @_silgen_name("ltx_setQuantize") func ltx_setQuantize(_ beats: Double)
 @_silgen_name("ltx_transportInfo") func ltx_transportInfo(_ which: Int32) -> Double
+@_silgen_name("ltx_audioLoad") func ltx_audioLoad(_ which: Int32) -> Double
 @_silgen_name("ltx_padDuration") func ltx_padDuration(_ id: UnsafePointer<CChar>) -> Double
 @_silgen_name("ltx_estimateBpm") func ltx_estimateBpm(_ path: UnsafePointer<CChar>) -> Double
 @_silgen_name("ltx_analyzeSample") func ltx_analyzeSample(_ path: UnsafePointer<CChar>) -> UnsafePointer<CChar>?
@@ -62,6 +63,17 @@ public class LiveTraxEngineModule: Module {
     Function("setMasterTempo") { (bpm: Double) in ltx_setMasterTempo(bpm) }
     Function("setPadBpm") { (padId: String, bpm: Double) in padId.withCString { ltx_setPadBpm($0, bpm) } }
     Function("applyTempo") { ltx_applyTempo() }
+
+    // Audio-thread load, for on-device profiling. load >= 1.0 means the
+    // callback used its whole deadline, which is where audio drops out.
+    Function("audioLoad") { () -> [String: Double] in
+      [
+        "avg": ltx_audioLoad(0),
+        "peak": ltx_audioLoad(1),      // reading resets the peak
+        "overruns": ltx_audioLoad(2),
+        "callbacks": ltx_audioLoad(3),
+      ]
+    }
 
     Function("startTransport") { ltx_startTransport() }
     Function("stopTransport") { ltx_stopTransport() }

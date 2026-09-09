@@ -38,6 +38,7 @@ void ltx_setMasterSignature(int num, int den) { core().setMasterSignature(num, d
 void ltx_setQuantize(double beats) { core().setQuantize(beats); }
 
 double ltx_transportInfo(int which) { return core().transportInfo(which); }
+double ltx_audioLoad(int which) { return core().audioLoad(which); }
 double ltx_padDuration(const char* id) { return core().padDuration(id ? std::string(id) : std::string()); }
 double ltx_estimateBpm(const char* path) { return core().estimateBpm(path ? std::string(path) : std::string()); }
 // Caller owns the result and must hand it back to ltx_freeString. Unlike the

@@ -46,6 +46,7 @@ public:
   // Readouts for the UI (polled from JS).
   //   which: 0=playing(0/1) 1=barIndex 2=beatInBar 3=phaseInBeat(0..1) 4=beatsPerBar
   double transportInfo(int which);
+  double audioLoad(int which);   // audio-thread load meter (0=avg 1=peak 2=overruns 3=callbacks)
   double padDuration(const std::string& id); // loop length in seconds (0 if none)
   double estimateBpm(const std::string& path);   // analyze a file, return detected BPM (0 if unknown)
   std::string analyzeSample(const std::string& path); // offline: BPM + transient markers (JSON)

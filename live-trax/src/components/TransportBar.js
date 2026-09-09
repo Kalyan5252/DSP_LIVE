@@ -3,6 +3,7 @@ import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { theme } from '../theme';
 import { Home, Play, Pause, Chevron, Metronome, Pencil } from './Icons';
 import syncStore from '../audio/syncStore';
+import CpuMeter from './CpuMeter';
 
 // Top toolbar: home + project, transport (play, tempo, signature), and quantize.
 // The beat dot reads the native transport directly (via syncStore), so it stays
@@ -47,6 +48,8 @@ export default function TransportBar({
       </View>
 
       <View style={styles.spacer} />
+
+      {__DEV__ ? <CpuMeter /> : null}
 
       <Pressable onPress={onToggleEdit} style={[styles.edit, editActive && styles.editActive]}>
         <Pencil size={15} color={editActive ? '#0E0E12' : theme.textDim} />

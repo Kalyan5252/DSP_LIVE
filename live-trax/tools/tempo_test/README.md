@@ -17,6 +17,35 @@ Decoding is miniaudio (WAV / MP3 / FLAC built in). The harness defines
 `MA_NO_DEVICE_IO`, so it links with no OS frameworks and builds the same on
 macOS and Linux.
 
+## Score a change (`make bench`)
+
+```bash
+make bench      # generate ground truth, build, and SCORE
+```
+
+`bench_gen.py` writes loops whose true tempo **and** true transient sample
+positions are both known (`bench/truth.json`), and `bench.py` scores against
+them — so a DSP change can be proven better or worse instead of eyeballed:
+
+```
+tempo   17/20 = 85%
+onsets  precision 1.000  recall 0.835  F1 0.910
+timing  median +0.0 ms   markers >20ms off: 0%
+phase   mean |beatOffset error| 10.4 ms
+```
+
+Tempo failures are named rather than lumped together (`2x`, `1/2x`, `3:2` …),
+because octave errors are the failure that actually happens. To prove a change
+is an improvement, keep a binary built from the old header and diff:
+
+```bash
+cp tempo_test /tmp/old_tempo_test        # before your change
+python3 bench.py ./tempo_test --vs /tmp/old_tempo_test
+```
+
+`timing` is the number that matters for slicing — a marker 30 ms early is an
+audible flam.
+
 ## Score it against known-BPM signals
 
 ```bash
