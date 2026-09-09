@@ -411,9 +411,28 @@ struct LiveTraxCore::Impl {
     st.process(inP.data(), (int)inN, outP.data(), (int)outN);
     st.process(inP.data(), (int)inN, outP.data(), (int)outN);
 
+    // De-rotate before handing the buffer over.
+    //
+    // The stretcher's output lags its input, so the rendered loop does NOT start
+    // on the loop's downbeat -- it starts inputLatency (in input frames, hence
+    // /rate to reach output frames) plus outputLatency later. That offset scales
+    // with the loop's ORIGINAL tempo, so every loop came back displaced by a
+    // DIFFERENT amount: measured 125 ms for a 90 bpm source and 185 ms for a
+    // 174 bpm source warped to the same target. Loops played in sync until the
+    // first applyTempo() and were irregularly flammed afterwards, because before
+    // that they were still playing their un-rendered original buffers.
+    //
+    // A loop is circular, so rotating the render back by exactly that offset
+    // restores the downbeat to sample 0 (verified: 0.0 ms residual).
+    const double rate = (double)inN / (double)outN;
+    long long rot = std::llround(st.inputLatency() / rate + st.outputLatency());
+    rot %= (long long)outN; if (rot < 0) rot += (long long)outN;
+
     std::vector<float> staged((size_t)outN * ch, 0.f);
-    for (ma_uint64 f = 0; f < outN; ++f)
-      for (int c = 0; c < ch; ++c) staged[(size_t)f * ch + c] = out[c][f];
+    for (ma_uint64 f = 0; f < outN; ++f) {
+      ma_uint64 src = (f + (ma_uint64)rot) % outN;
+      for (int c = 0; c < ch; ++c) staged[(size_t)f * ch + c] = out[c][src];
+    }
 
     {
       std::lock_guard<std::mutex> lk(v->swapMtx);
