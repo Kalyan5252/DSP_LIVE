@@ -176,7 +176,44 @@ struct RunResult {
   double p95 = 0, p99 = 0, pmax = 0;  // ms in a single 256-frame callback
 };
 
+// Count audible discontinuities: sample deltas far outside the signal's own
+// distribution. This is the "blocky" sound -- a click, not a CPU problem, and
+// invisible to every constant-ratio quality metric.
+static int clickCount(const Audio& a) {
+  size_t n = a.frames();
+  if (n < 64) return 0;
+  std::vector<double> d; d.reserve(n - 1);
+  for (size_t f = 1; f < n; ++f) {
+    double s = 0.0;
+    for (int c = 0; c < a.channels; ++c)
+      s += std::fabs(a.data[f*a.channels+c] - a.data[(f-1)*a.channels+c]);
+    d.push_back(s / a.channels);
+  }
+  std::vector<double> srt = d;
+  std::sort(srt.begin(), srt.end());
+  double p99 = srt[(size_t)(srt.size() * 0.99)];
+  if (p99 <= 1e-9) return 0;
+  int n_ = 0;
+  for (double x : d) if (x > 8.0 * p99) ++n_;
+  return n_;
+}
+
+// A real tempo drag is a ratio that MOVES. Constant-ratio numbers say nothing
+// about it, so the harness can sweep, and can reproduce the engine's habit of
+// reset()ing the stretcher mid-stream to show what that costs.
+struct RunOpts {
+  double ratioA = 1.0, ratioB = 1.0;   // ramped across the run
+  int resetEvery = 0;                  // callbacks between reset() (0 = never)
+};
+
+static RunResult run(Backend& be, const Audio& in, const RunOpts& o, size_t outFrames);
+
 static RunResult run(Backend& be, const Audio& in, double ratio, size_t outFrames) {
+  RunOpts o; o.ratioA = o.ratioB = ratio;
+  return run(be, in, o, outFrames);
+}
+
+static RunResult run(Backend& be, const Audio& in, const RunOpts& o, size_t outFrames) {
   const int ch = in.channels;
   RunResult r;
   r.out.channels = ch; r.out.sampleRate = in.sampleRate;
@@ -202,7 +239,7 @@ static RunResult run(Backend& be, const Audio& in, double ratio, size_t outFrame
   // Prime: the stretcher needs its window filled before the output is valid,
   // and the loop must be fed circularly or the seam is measuring a fade-in.
   for (int w = 0; w < 8; ++w) {
-    int need = std::max(1, (int)std::llround(kCallback * ratio));
+    int need = std::max(1, (int)std::llround(kCallback * o.ratioA));
     for (int i = 0; i < need; ++i) {
       for (int c = 0; c < ch; ++c) ib[c][i] = in.data[(inPos % in.frames()) * ch + c];
       ++inPos;
@@ -211,9 +248,15 @@ static RunResult run(Backend& be, const Audio& in, double ratio, size_t outFrame
   }
   inPos = 0;
 
+  long callbackIdx = 0;
   while (done < renderFrames) {
     int block = (int)std::min<size_t>(kCallback, renderFrames - done);
+    double t = renderFrames ? (double)done / (double)renderFrames : 0.0;
+    double ratio = o.ratioA + (o.ratioB - o.ratioA) * t;
     int need = std::max(1, (int)std::llround(block * ratio));
+    if (o.resetEvery > 0 && callbackIdx > 0 && (callbackIdx % o.resetEvery) == 0)
+      be.reset();
+    ++callbackIdx;
     for (int i = 0; i < need; ++i) {
       for (int c = 0; c < ch; ++c) ib[c][i] = in.data[(inPos % in.frames()) * ch + c];
       ++inPos;
@@ -377,12 +420,21 @@ int main(int argc, char** argv) {
   std::vector<std::string> files;
   std::vector<double> ratios;
   std::string only, writeDir;
+  double sweepA = 0, sweepB = 0; bool sweep = false;
+  int resetEvery = 0;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--ratio" && i + 1 < argc) ratios.push_back(atof(argv[++i]));
     else if (a == "--backend" && i + 1 < argc) only = argv[++i];
     else if (a == "--write" && i + 1 < argc) writeDir = argv[++i];
+    else if (a == "--sweep" && i + 1 < argc) {
+      std::string v = argv[++i]; size_t c = v.find(':');
+      if (c == std::string::npos) { printf("--sweep wants A:B, e.g. 1.0:1.25\n"); return 1; }
+      sweepA = atof(v.substr(0, c).c_str()); sweepB = atof(v.substr(c + 1).c_str());
+      sweep = true;
+    }
+    else if (a == "--reset-every" && i + 1 < argc) resetEvery = atoi(argv[++i]);
     else if (a.rfind("--", 0) == 0) { printf("unknown option %s\n", a.c_str()); return 1; }
     else files.push_back(a);
   }
@@ -399,6 +451,36 @@ int main(int argc, char** argv) {
            " deadline %.2f ms)\n\n",
            path.c_str(), (double)in.frames() / in.sampleRate, in.channels, in.sampleRate,
            kCallback, 1000.0 * kCallback / in.sampleRate);
+
+    if (sweep) {
+      // A tempo drag, reproduced: the ratio moves across the run. Constant-ratio
+      // quality metrics are meaningless here, so report cost and CLICKS -- the
+      // blocky sound is a discontinuity, not a CPU number.
+      size_t outFrames = in.frames();
+      printf("  tempo sweep %.3f -> %.3f%s\n", sweepA, sweepB,
+             resetEvery ? "   (with periodic stretcher reset)" : "");
+      printf("  %-22s %7s %8s %8s %8s | %7s\n",
+             "backend", "core%", "p95", "p99", "max", "clicks");
+      for (const char* bn : kBackends) {
+        if (!only.empty() && only != bn) continue;
+        auto be = makeBackend(bn);
+        if (!be) continue;
+        RunOpts o; o.ratioA = sweepA; o.ratioB = sweepB; o.resetEvery = resetEvery;
+        RunResult rr = run(*be, in, o, outFrames);
+        printf("  %-22s %6.2f%% %6.3fms %6.3fms %6.3fms | %7d\n",
+               be->name(), rr.corePct, rr.p95, rr.p99, rr.pmax, clickCount(rr.out));
+        if (!writeDir.empty()) {
+          std::string base = path.substr(path.find_last_of("/\\") + 1);
+          if (base.size() > 4) base = base.substr(0, base.size() - 4);
+          char nm[512];
+          snprintf(nm, sizeof(nm), "%s/%s_%s_sweep%s.wav", writeDir.c_str(), base.c_str(), bn,
+                   resetEvery ? "_reset" : "");
+          if (writeWav(nm, rr.out)) printf("  %-22s -> %s\n", "", nm);
+        }
+      }
+      printf("\n");
+      continue;
+    }
 
     for (double ratio : ratios) {
       size_t outFrames = (size_t)(in.frames() / ratio);
@@ -434,7 +516,8 @@ int main(int argc, char** argv) {
       printf("\n");
     }
   }
-  printf("core%% = sustained cost of ONE voice; multiply by your voice count\n"
+  printf("clicks= sample discontinuities far outside the signal's own distribution\n"
+         "core%% = sustained cost of ONE voice; multiply by your voice count\n"
          "struct= onset-envelope correlation with the input (1.0 = rhythm intact)\n"
          "sharp = attack sharpness vs the input (1.0 = as sharp, <1 = smeared)\n"
          "spec  = distance from the presetDefault reference (0 = identical to it)\n"
